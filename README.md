@@ -12,24 +12,24 @@ Piffero can load big files larger than memory used and return the required conte
 ```
 # Description
 
-The version 1.0.0 only support the full qualified JSONpath
+The library supports full JSONPath syntax including wildcards, recursive descent, slices, unions, filters, and script expressions:
 
 example: `$.father.son.array[:index].attribute`
 
-The sintax that will be implemented in the next future and the examples from [Stefan Goessner's post](http://goessner.net/articles/JsonPath/) 
+Supported syntax from [Stefan Goessner's post](http://goessner.net/articles/JsonPath/):
 
 JSONPath           | Description                                                          |Implemented
 -------------------|----------------------------------------------------------------------|------------
 `$`                | The root object/element                                              | ✅
-`@`                | The current object/element                                           | 
+`@`                | The current object/element                                           | ✅
 `.`                | Child member operator                                                | ✅
-`..`	             | Recursive descendant operator; JSONPath borrows this syntax from E4X | 
-`*`	             | Wildcard matching all objects/elements regardless their names        | 
-`[]`	             | Subscript operator                                                   | ✅ 
-`[,]`	             | Union operator for alternate names or array indices as a set         | ✅ 
-`[start:end:step]` | Array slice operator borrowed from ES4 / Python                      | ✅ 
-`?()`              | Applies a filter (script) expression via static evaluation           |  
-`()`	             | Script expression via static evaluation                              |  
+`..`	             | Recursive descendant operator; JSONPath borrows this syntax from E4X | ✅
+`*`	             | Wildcard matching all objects/elements regardless their names        | ✅
+`[]`	             | Subscript operator                                                   | ✅
+`[,]`	             | Union operator for alternate names or array indices as a set         | ✅
+`[start:end:step]` | Array slice operator borrowed from ES4 / Python                      | ✅
+`?()`              | Applies a filter (script) expression via static evaluation           | ✅
+`()`	             | Script expression via static evaluation                              | ✅
 
 See the [replit.com demo](https://replit.com/@nigrosimone/Piffero#index.js).
 # Get Started
