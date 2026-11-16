@@ -1,6 +1,6 @@
 import { CStream } from "./../libs/clarinet/cstream";
 import { ConditionEval } from "../conditioneval/conditioneval";
-import { Duplex, Readable, Stream } from "stream";
+import { Readable, Stream } from "stream";
 
 export type PifferoOpt = "string" | "stream";
 
@@ -16,6 +16,8 @@ export const PATH_DOESNT_MATCH = "Path doesn't match";
 export class PifferoError extends Error {}
 
 export class PifferoJsonPathError extends Error {}
+
+const STREAM_CHUNK_THRESHOLD = 4096;
 
 type PifferoEvent =
   | typeof OPEN_OBJECT
@@ -47,7 +49,7 @@ export class PifferoStatus {
 
   _isBulkResponse = false;
 
-  temp = "";
+  tempChunks: string[] = [];
 
   end: boolean = false;
   close: boolean = false;
@@ -84,6 +86,27 @@ export class PifferoStatus {
     }
   }
 
+  hasTemp(): boolean {
+    return this.tempChunks.length > 0;
+  }
+
+  appendTemp(value: string) {
+    this.tempChunks.push(value);
+  }
+
+  resetTemp(initial?: string) {
+    this.tempChunks = initial !== undefined ? [initial] : [];
+  }
+
+  flushTemp(): string {
+    if (this.tempChunks.length === 0) {
+      return "";
+    }
+    const joined = this.tempChunks.join("");
+    this.tempChunks = [];
+    return joined;
+  }
+
   get needComma(): boolean {
     return (
       this.last === CLOSE_ARRAY ||
@@ -97,30 +120,19 @@ export class PifferoStatus {
   }
 
   checkIndex() {
-    if (this.path.indexes && this.path.indexes.length > 0) {
-      return this.path.indexes.indexOf(this.currentIndex) >= 0;
+    if (this.path.indexes && this.path.indexes.size > 0) {
+      return this.path.indexes.has(this.currentIndex);
     }
     const range = this.path.range;
-    let start = 0;
-    let end = this.currentIndex + 1;
-    let step = 1;
-
-    if (range.start >= 0) {
-      start = range.start;
-    }
+    const start = range.start >= 0 ? range.start : 0;
     if (this.currentIndex < start) {
       return false;
     }
-    if (range.end > 0) {
-      end = range.end;
-    }
-    if (this.currentIndex > end) {
+    if (range.end > 0 && this.currentIndex >= range.end) {
       return false;
     }
-    if (range.step > 0) {
-      step = range.step;
-    }
-    return Number.isInteger((this.currentIndex - start) / step);
+    const step = range.step > 0 ? range.step : 1;
+    return (this.currentIndex - start) % step === 0;
   }
 }
 
@@ -133,7 +145,7 @@ export class MasterHandler {
   callback: (result, error?) => void;
   error = null;
   stream: Readable;
-  output: Duplex;
+  output: Readable;
 
   parse(
     stream: Stream,
@@ -145,56 +157,37 @@ export class MasterHandler {
     this.callback = callback;
     this.stream = stream as Readable;
     this.useString = useString;
-    this.output = new Stream.Transform();
+    this.output = new Readable({
+      read: () => {
+        if (this.stream && this.stream.isPaused()) {
+          this.stream.resume();
+        }
+      },
+    });
 
-    // ------ da ottimizzare ----
-    //let status = new PifferoStatus(parsedPath);
     const singleStepHandler = new SingleStepHandler(
       parsedPath,
       this.output,
-      useString
-      // opt
+      this.stream,
+      useString,
+      isBulk
     );
 
     this.stepHandlers.push(singleStepHandler);
 
     while (parsedPath.next && !parsedPath.hascondtion) {
       parsedPath = parsedPath.next;
-      //  status = new PifferoStatus(parsedPath,isBulk);
-      const singleStepHandler = new SingleStepHandler(
+      const stepHandler = new SingleStepHandler(
         parsedPath,
         this.output,
+        this.stream,
         useString,
         isBulk
       );
-      this.stepHandlers.push(singleStepHandler);
+      this.stepHandlers.push(stepHandler);
     }
 
-    let output2: Stream = undefined;
-
-    // recursive if has condition ... no better solution for now :(
-    if (parsedPath.next) {
-      const nexthandler: MasterHandler = new MasterHandler();
-      output2 = new Stream.Transform();
-      const nextParsedPath: ParsedPath = {
-        value: '"$"',
-        next: parsedPath.next,
-        indexes: [],
-        isbulk: true,
-        hascondtion: false,
-        recursiveDescendant: false,
-      };
-      // const opt2 = this._opt;
-      this.useString = false;
-      output2 = nexthandler.parse(
-        this.output as Stream,
-        nextParsedPath,
-        useString,
-        callback,
-        true
-      );
-      this.callback = (result, error) => {};
-    } else {
+    if (!useString) {
       this.output.push("[");
     }
 
@@ -204,9 +197,6 @@ export class MasterHandler {
     this.cStream = new CStream(this);
     this.stream.pipe(this.cStream);
     if (!useString) {
-      if (output2) {
-        return output2;
-      }
       return this.output;
     }
   }
@@ -278,11 +268,12 @@ export class MasterHandler {
   endOutput() {
     this.currentHandler.status.close = true;
     if (!this.useString) {
+      this.currentHandler.flushStreamBuffer();
       this.output.push("]");
       this.output.push(null);
     } else {
-      this.currentHandler.outputString += "]";
-      this.callback(this.currentHandler.outputString, this.error);
+      this.currentHandler.outputChunks.push("]");
+      this.callback(this.currentHandler.outputChunks.join(""), this.error);
     }
   }
 
@@ -301,37 +292,131 @@ export class MasterHandler {
   onerror(er) {
     this.error = new PifferoError(er);
     if (!this.useString) {
-      throw new PifferoError(this.error);
+      this.currentHandler.status.close = true;
+      this.output.destroy(this.error);
     }
   }
+}
+
+function extractFromParsed(obj: any, path: ParsedPath): any[] {
+  if (!path) {
+    return [obj];
+  }
+  const key = path.value.slice(1, -1);
+  if (obj === null || obj === undefined || typeof obj !== "object" || !(key in obj)) {
+    return [];
+  }
+  const val = obj[key];
+  if (Array.isArray(val) && (path.isbulk || path.range || (path.indexes && path.indexes.size > 0))) {
+    const matched: any[] = [];
+    for (let i = 0; i < val.length; i++) {
+      let ok = false;
+      if (path.indexes && path.indexes.size > 0) {
+        ok = path.indexes.has(i);
+      } else if (path.range) {
+        const start = path.range.start >= 0 ? path.range.start : 0;
+        const step = path.range.step > 0 ? path.range.step : 1;
+        ok = i >= start && (path.range.end <= 0 || i < path.range.end) && (i - start) % step === 0;
+      }
+      if (ok) {
+        if (path.next) {
+          matched.push(...extractFromParsed(val[i], path.next));
+        } else {
+          matched.push(val[i]);
+        }
+      }
+    }
+    return matched;
+  }
+  if (path.next) {
+    return extractFromParsed(val, path.next);
+  }
+  return [val];
 }
 
 class SingleStepHandler {
   status: PifferoStatus;
   isLast = false;
-  _output: Duplex;
+  _output: Readable;
+  _inputStream: Readable;
   useString = false;
-  outputString = "[";
-  push: (value) => void;
+  outputChunks: string[] = ["["];
+  private streamBuffer: string[] = [];
+  private streamBufferLen = 0;
+  private postConditionPath: ParsedPath = null;
+  private candidateChunks: string[] = [];
+  private hasEmittedPostCondition = false;
+  push: (value: string) => void;
+  private emitOutput: (value: string) => void;
 
   constructor(
     path: ParsedPath,
-    output: Duplex,
-    useString,
+    output: Readable,
+    inputStream: Readable,
+    useString: boolean,
     isBulk: boolean = false
   ) {
     this.useString = useString;
     this.status = new PifferoStatus(path, isBulk);
     this._output = output;
+    this._inputStream = inputStream;
     this.isLast =
       path.next == undefined || path.next == null || path.hascondtion;
+    if (path.hascondtion && path.next) {
+      this.postConditionPath = path.next;
+    }
     if (this.isLast) {
       if (this.useString) {
-        this.push = (value) => (this.outputString += value);
+        this.emitOutput = (value: string) => this.outputChunks.push(value);
       } else {
-        this.push = (value) => this._output.push(value);
+        this.emitOutput = (value: string) => {
+          this.streamBuffer.push(value);
+          this.streamBufferLen += value.length;
+          if (this.streamBufferLen >= STREAM_CHUNK_THRESHOLD) {
+            this.flushStreamBuffer();
+          }
+        };
+      }
+      if (this.postConditionPath) {
+        this.push = (value: string) => this.candidateChunks.push(value);
+      } else {
+        this.push = this.emitOutput;
       }
     }
+  }
+
+  flushStreamBuffer() {
+    if (this.streamBuffer.length > 0) {
+      const chunk = this.streamBuffer.join("");
+      this.streamBuffer = [];
+      this.streamBufferLen = 0;
+      if (!this._output.push(chunk) && this._inputStream && !this._inputStream.isPaused()) {
+        this._inputStream.pause();
+      }
+    }
+  }
+
+  flushCandidateObject() {
+    if (!this.postConditionPath || this.candidateChunks.length === 0) {
+      return;
+    }
+    const raw = this.candidateChunks.join("");
+    this.candidateChunks = [];
+    const obj = JSON.parse(raw);
+    const extracted = extractFromParsed(obj, this.postConditionPath);
+    for (const item of extracted) {
+      const serialized = JSON.stringify(item);
+      if (this.hasEmittedPostCondition) {
+        this.emitOutput(`,${serialized}`);
+      } else {
+        this.emitOutput(serialized);
+        this.hasEmittedPostCondition = true;
+      }
+    }
+    this.status.recording = false;
+    this.status.verified = false;
+    this.status.waitingForArrayClosing = true;
+    this.status.depthCounter++;
   }
 
   stopHandler(force = false) {
@@ -357,7 +442,7 @@ class SingleStepHandler {
         (status.isMatching && status.depthCounter === 1)
       ) {
         this.stopHandler();
-        status.temp = `,${string}`;
+        status.resetTemp(`,${string}`);
         status.depthCounter++;
       } else {
         if (status.needComma) {
@@ -386,14 +471,14 @@ class SingleStepHandler {
         // --------------- condition per json path query -------
       }
       if (status.path.condition) {
-        status.temp = `{${node}:`;
+        status.resetTemp(`{${node}:`);
       }
     } else if (status.isMatching && status.depthCounter > 2) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += `,{${node}:`;
+          status.appendTemp(`,{${node}:`);
         } else {
-          status.temp += `{${node}:`;
+          status.appendTemp(`{${node}:`);
         }
       }
     }
@@ -417,15 +502,18 @@ class SingleStepHandler {
         this.stopHandler();
       } else {
         this.push(`}`);
+        if (this.postConditionPath && status.depthCounter === 2) {
+          this.flushCandidateObject();
+        }
       }
     }
     //------ condition case ----------
     else if (status.isMatching && status.depthCounter > 2) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += ",";
+          status.appendTemp(",");
         }
-        status.temp += "}";
+        status.appendTemp("}");
       }
     }
     // -------------
@@ -455,14 +543,14 @@ class SingleStepHandler {
     }
     // ------ condition case -------
     else if (status.isMatching && status.depthCounter > 2) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += ",";
+          status.appendTemp(",");
         }
-        status.temp += "[";
+        status.appendTemp("[");
       }
     } else if (status.depthCounter === 3) {
-      status.temp = "";
+      status.resetTemp();
     } else if (status.isMatching && status.depthCounter === 2) {
       status.currentIndex++;
       if (status.path.isbulk && status.checkIndex()) {
@@ -474,7 +562,7 @@ class SingleStepHandler {
         status.depthCounter--; // da verificare
         // --------------- condition per json path query -------
       } else if (status.path.condition) {
-        status.temp = `[`;
+        status.resetTemp(`[`);
       }
     }
     // ---------------
@@ -502,17 +590,14 @@ class SingleStepHandler {
     }
     //------ condition case close array----------
     else if (status.isMatching && status.depthCounter > 3) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += ",";
+          status.appendTemp(",");
         }
-        status.temp += "]";
+        status.appendTemp("]");
       }
     }
     status.depthCounter--;
-    //  if (status.depthCounter < 3) {
-    // status.currentIndex=0;
-    // }
     status.last = CLOSE_ARRAY;
   }
 
@@ -539,11 +624,11 @@ class SingleStepHandler {
       }
     } //------ condition case key----------
     else if (status.isMatching && status.depthCounter > 2) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += ",";
+          status.appendTemp(",");
         }
-        status.temp += `${node}:`;
+        status.appendTemp(`${node}:`);
       }
     }
     status.lastkey = node;
@@ -563,7 +648,6 @@ class SingleStepHandler {
     ) {
       status.currentIndex++;
       if (status.checkIndex() && !status.close) {
-        //  console.log(status.path.range, status.currentIndex);
         if (status.currentIndex > status.path.range.start) {
           this.push(`,${node}`);
         } else {
@@ -588,19 +672,18 @@ class SingleStepHandler {
       status.recording = true;
       status.verified = true;
       status.depthCounter--;
-      this.push(status.temp);
-      if (status.needComma) {
+      this.push(status.flushTemp());
+      if (status.needComma && !this.postConditionPath) {
         this.push(`,${node}`);
       } else {
         this.push(node);
       }
-      status.temp = "";
     } else if (status.isMatching && status.depthCounter > 2) {
-      if (status.temp.length > 0) {
+      if (status.hasTemp()) {
         if (status.needComma) {
-          status.temp += ",";
+          status.appendTemp(",");
         }
-        status.temp += node;
+        status.appendTemp(node);
       }
     }
     status.last = VALUE;
@@ -622,7 +705,7 @@ class SingleStepHandler {
 export interface ParsedPath {
   value: string;
   range?: { start?: number; end?: number; step?: number };
-  indexes?: number[];
+  indexes?: Set<number>;
   isbulk: boolean;
   condition?: {
     key: string;
@@ -665,7 +748,6 @@ function checkCondition(condition: string) {
   return null;
 }
 
-// need refactoring for perfomance
 function buildParsedPath(jsonPath: string, paths: string[]): ParsedPath {
   if (paths.length === 0) {
     return null;
@@ -673,7 +755,7 @@ function buildParsedPath(jsonPath: string, paths: string[]): ParsedPath {
   let isBulk = false;
   let value = paths[0];
   let range = null;
-  const indexes = [];
+  let indexes: Set<number> = undefined;
   let condition = null;
   if (value.endsWith("]")) {
     value = value.substr(0, value.length - 1);
@@ -690,7 +772,7 @@ function buildParsedPath(jsonPath: string, paths: string[]): ParsedPath {
         range = {
           start: Number(splittedIndexes[0]),
         };
-        splittedIndexes.forEach((element) => indexes.push(Number(element)));
+        indexes = new Set<number>(splittedIndexes.map((el) => Number(el)));
       } else {
         const rangeArray = splitted[1].split(":");
         const [start, end, step] = rangeArray;
@@ -699,26 +781,11 @@ function buildParsedPath(jsonPath: string, paths: string[]): ParsedPath {
           end: end ? Number(end) : 0,
           step: step ? Number(step) : 1,
         };
-        let _start = range.start;
-        let _end = range.end;
-        let _step = range.step;
-
-        if (
-          rangeArray.length === 1 || // onlly start
-          // not end with start and step
-          (end !== undefined &&
-            end !== null &&
-            end.trim() !== "0" &&
-            rangeArray.length >= 2)
-        ) {
-          indexes.push(_start);
-          for (let i = _start + _step; i < _end; i += _step) {
-            indexes.push(i);
-          }
+        if (rangeArray.length === 1) {
+          indexes = new Set<number>([range.start]);
         }
       }
     }
-    indexes;
   }
 
   return {
