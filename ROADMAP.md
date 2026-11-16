@@ -31,11 +31,11 @@ Focus su prestazioni su file di grandi dimensioni, riduzione allocazioni e gesti
 ## Fase 2 — Completamento Sintassi JSONPath (v1.3.0)
 Allineamento alle specifiche JSONPath complete descritte nel `README.md` (OpenSpec `complete-jsonpath-syntax`):
 
-- [ ] **#8 — Wildcard `*`** (es. `$.employees[*].name`, `$.*`).
-- [ ] **#9 — Recursive descent `..`** (es. `$..phoneNumbers`, `$.employees..type`).
-- [ ] **#10 — Filtri completi `?()`**: supporto a operatori di confronto (`!=`, `!==`, `==`, `>`, `<`, `>=`, `<=`), operatori logici (`&&`, `||`, `!`) e verifica di esistenza proprietà.
-- [ ] **#11 — Operatore elemento corrente `@`**: riferimento diretto su primitivi (`[?(@ > 10)]`) e proprietà annidate (`@.address.city`).
-- [ ] **#12 — Script expression `()`**: valutazione espressioni subscript (es. `[(1+1)]`, `[(@.length-1)]`).
+- [x] **#8 — Wildcard `*`** (es. `$.employees[*].name`, `$.*`).
+- [x] **#9 — Recursive descent `..`** (es. `$..phoneNumbers`, `$.employees..type`).
+- [x] **#10 — Filtri completi `?()`**: supporto a operatori di confronto (`!=`, `!==`, `==`, `>`, `<`, `>=`, `<=`), operatori logici (`&&`, `||`, `!`) e verifica di esistenza proprietà.
+- [x] **#11 — Operatore elemento corrente `@`**: riferimento diretto su primitivi (`[?(@ > 10)]`) e proprietà annidate (`@.address.city`).
+- [x] **#12 — Script expression `()`**: valutazione espressioni subscript (es. `[(1+1)]`, `[(@.length-1)]`).
 
 ---
 

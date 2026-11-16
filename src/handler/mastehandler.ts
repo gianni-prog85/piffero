@@ -1,6 +1,13 @@
 import { CStream } from "./../libs/clarinet/cstream";
-import { ConditionEval } from "../conditioneval/conditioneval";
 import { Readable, Stream } from "stream";
+import {
+  StreamingPathEngine,
+  tokenizeJsonPath,
+  buildLegacyAndDetermineEngine,
+  LegacyParsedPath,
+  PATH_ERROR_MESSAGE,
+  PifferoJsonPathError,
+} from "./jsonpathEngine";
 
 export type PifferoOpt = "string" | "stream";
 
@@ -11,11 +18,9 @@ const CLOSE_ARRAY = "array-close";
 const VALUE = "value";
 const KEY = "key";
 const FIRST = "first";
-export const PATH_ERROR_MESSAGE = "Invalid json path";
+export { PATH_ERROR_MESSAGE, PifferoJsonPathError };
 export const PATH_DOESNT_MATCH = "Path doesn't match";
 export class PifferoError extends Error {}
-
-export class PifferoJsonPathError extends Error {}
 
 const STREAM_CHUNK_THRESHOLD = 4096;
 
@@ -146,6 +151,11 @@ export class MasterHandler {
   error = null;
   stream: Readable;
   output: Readable;
+  private streamingEngine: StreamingPathEngine = null;
+  private engineClosed = false;
+  private engineOutputChunks: string[] = ["["];
+  private engineStreamBuffer: string[] = [];
+  private engineStreamBufferLen = 0;
 
   parse(
     stream: Stream,
@@ -164,6 +174,22 @@ export class MasterHandler {
         }
       },
     });
+
+    if (parsedPath.needsStreamingEngine && parsedPath.steps) {
+      this.streamingEngine = new StreamingPathEngine(
+        parsedPath.steps,
+        (chunk: string) => this.pushEngineOutput(chunk)
+      );
+      if (!useString) {
+        this.output.push("[");
+      }
+      this.cStream = new CStream(this);
+      this.stream.pipe(this.cStream);
+      if (!useString) {
+        return this.output;
+      }
+      return;
+    }
 
     const singleStepHandler = new SingleStepHandler(
       parsedPath,
@@ -201,7 +227,33 @@ export class MasterHandler {
     }
   }
 
+  private pushEngineOutput(value: string) {
+    if (this.useString) {
+      this.engineOutputChunks.push(value);
+    } else {
+      this.engineStreamBuffer.push(value);
+      this.engineStreamBufferLen += value.length;
+      if (this.engineStreamBufferLen >= STREAM_CHUNK_THRESHOLD) {
+        this.flushEngineStreamBuffer();
+      }
+    }
+  }
+
+  private flushEngineStreamBuffer() {
+    if (this.engineStreamBuffer.length > 0) {
+      const chunk = this.engineStreamBuffer.join("");
+      this.engineStreamBuffer = [];
+      this.engineStreamBufferLen = 0;
+      if (!this.output.push(chunk) && this.stream && !this.stream.isPaused()) {
+        this.stream.pause();
+      }
+    }
+  }
+
   checkStreams() {
+    if (this.streamingEngine) {
+      return;
+    }
     if (this.currentHandler.status.end && this.currentHandler.isLast) {
       this.cStream.destroy();
       this.stream.unpipe();
@@ -210,6 +262,9 @@ export class MasterHandler {
   }
 
   shiftParser() {
+    if (this.streamingEngine) {
+      return;
+    }
     if (!this.currentHandler.isLast && this.currentHandler.status.recording) {
       let last = this.currentHandler.status.last;
       const lastkey = this.currentHandler.status.lastkey;
@@ -228,30 +283,50 @@ export class MasterHandler {
 
   // --- OPEN OBJECT -----------------------------------------------------------
   onopenobject(node) {
+    if (this.streamingEngine) {
+      this.streamingEngine.onopenobject(node);
+      return;
+    }
     this.currentHandler.openObject(node);
     this.shiftParser();
   }
 
   // ------ OPEN ARRAY -----------------------------------------------------------
   onopenarray() {
+    if (this.streamingEngine) {
+      this.streamingEngine.onopenarray();
+      return;
+    }
     this.currentHandler.openArray();
     this.shiftParser();
   }
 
   // --- CLOSE OBJECT  -------------------------------------------------------
   oncloseobject() {
+    if (this.streamingEngine) {
+      this.streamingEngine.oncloseobject();
+      return;
+    }
     this.currentHandler.closeObject();
     this.checkStreams();
   }
 
   // --- CLOSE ARRAY  -------------------------------------------------------
   onclosearray() {
+    if (this.streamingEngine) {
+      this.streamingEngine.onclosearray();
+      return;
+    }
     this.currentHandler.closeArray();
     this.checkStreams();
   }
 
   // ------ KEY  --------------------------------------------------------
   onkey(node) {
+    if (this.streamingEngine) {
+      this.streamingEngine.onkey(node);
+      return;
+    }
     this.currentHandler.key(node);
     this.shiftParser();
     this.checkStreams();
@@ -260,12 +335,28 @@ export class MasterHandler {
 
   //--- VALUE -----------------------------------------------------------
   onvalue(node) {
+    if (this.streamingEngine) {
+      this.streamingEngine.onvalue(node);
+      return;
+    }
     this.currentHandler.value(node);
     this.checkStreams();
   }
 
   //---END VALUE -----------------------------------------------------------
   endOutput() {
+    if (this.streamingEngine) {
+      this.engineClosed = true;
+      if (!this.useString) {
+        this.flushEngineStreamBuffer();
+        this.output.push("]");
+        this.output.push(null);
+      } else {
+        this.engineOutputChunks.push("]");
+        this.callback(this.engineOutputChunks.join(""), this.error);
+      }
+      return;
+    }
     this.currentHandler.status.close = true;
     if (!this.useString) {
       this.currentHandler.flushStreamBuffer();
@@ -278,12 +369,24 @@ export class MasterHandler {
   }
 
   onend() {
+    if (this.streamingEngine) {
+      if (!this.engineClosed) {
+        this.endOutput();
+      }
+      return;
+    }
     if (!this.currentHandler.status.close) {
       this.endOutput();
     }
   }
 
   onclose() {
+    if (this.streamingEngine) {
+      if (!this.engineClosed) {
+        this.endOutput();
+      }
+      return;
+    }
     if (!this.currentHandler.status.close) {
       this.endOutput();
     }
@@ -292,7 +395,11 @@ export class MasterHandler {
   onerror(er) {
     this.error = new PifferoError(er);
     if (!this.useString) {
-      this.currentHandler.status.close = true;
+      if (this.streamingEngine) {
+        this.engineClosed = true;
+      } else {
+        this.currentHandler.status.close = true;
+      }
       this.output.destroy(this.error);
     }
   }
@@ -702,100 +809,9 @@ class SingleStepHandler {
   }
 }
 
-export interface ParsedPath {
-  value: string;
-  range?: { start?: number; end?: number; step?: number };
-  indexes?: Set<number>;
-  isbulk: boolean;
-  condition?: {
-    key: string;
-    value: string;
-  }; // ?? not supported yet
-  next: ParsedPath;
-  hascondtion: boolean;
-  recursiveDescendant: boolean; // ?? not supported yet
-}
+export type ParsedPath = LegacyParsedPath;
 
 export function parse(jsonPath: string): ParsedPath {
-  if (!jsonPath.startsWith("$")) {
-    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${jsonPath}`);
-  }
-  jsonPath = jsonPath.replace("$.[", "$[");
-  // accrocco;
-  jsonPath = jsonPath.split("@.").join("!");
-  const paths = jsonPath.split(".");
-  return buildParsedPath(jsonPath, paths);
-}
-
-function checkCondition(condition: string) {
-  if (condition.trim().startsWith("?(!")) {
-    condition = condition.replace("?(!", "");
-    condition = condition.replace("===", "==");
-    let conditions = condition.split("==");
-    let valuestring = conditions[1].substr(0, conditions[1].length - 1);
-    let value;
-    if (
-      valuestring.startsWith("`") ||
-      valuestring.startsWith('"') ||
-      valuestring.startsWith("'")
-    ) {
-      value = '"' + valuestring.substr(1, valuestring.length - 2) + '"';
-    } else {
-      value = ConditionEval.staticEval(valuestring);
-    }
-    return { key: `"${conditions[0]}"`, value: value };
-  }
-  return null;
-}
-
-function buildParsedPath(jsonPath: string, paths: string[]): ParsedPath {
-  if (paths.length === 0) {
-    return null;
-  }
-  let isBulk = false;
-  let value = paths[0];
-  let range = null;
-  let indexes: Set<number> = undefined;
-  let condition = null;
-  if (value.endsWith("]")) {
-    value = value.substr(0, value.length - 1);
-    const splitted = value.split("[");
-    value = splitted[0];
-    if (splitted.length < 2) {
-      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${jsonPath}`);
-    }
-    condition = checkCondition(splitted[1]);
-    if (!condition) {
-      isBulk = true;
-      const splittedIndexes = splitted[1].split(",");
-      if (splittedIndexes.length > 1) {
-        range = {
-          start: Number(splittedIndexes[0]),
-        };
-        indexes = new Set<number>(splittedIndexes.map((el) => Number(el)));
-      } else {
-        const rangeArray = splitted[1].split(":");
-        const [start, end, step] = rangeArray;
-        range = {
-          start: Number(start),
-          end: end ? Number(end) : 0,
-          step: step ? Number(step) : 1,
-        };
-        if (rangeArray.length === 1) {
-          indexes = new Set<number>([range.start]);
-        }
-      }
-    }
-  }
-
-  return {
-    value: `"${value}"`,
-    next: buildParsedPath(jsonPath, paths.slice(1)),
-    condition: condition,
-    range: range,
-    isbulk: isBulk,
-    indexes: indexes,
-    recursiveDescendant: false,
-    hascondtion: condition !== null && condition !== undefined,
-  };
+  const steps = tokenizeJsonPath(jsonPath);
+  return buildLegacyAndDetermineEngine(jsonPath, steps);
 }
