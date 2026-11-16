@@ -24,7 +24,8 @@
     "benchmark": "npm run build && cd benchmarking && node index.js",
     "benchmark:compare": "npm run build && node benchmarking/compare-parsers.js",
     "benchmark:bfj": "npm run build && node benchmarking/compare-bfj.js",
-    "benchmark:streaming": "npm run build && node benchmarking/compare-streaming.js"
+    "benchmark:streaming": "npm run build && node benchmarking/compare-streaming.js",
+    "benchmark:200mb": "npm run build && node benchmarking/compare-200mb.js"
   },
   "repository": {
     "type": "git",

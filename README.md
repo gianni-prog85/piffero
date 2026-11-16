@@ -213,11 +213,12 @@ npm run benchmark                # Benchmark.Suite (Piffero vs Oboe vs @streampa
 npm run benchmark:compare        # 9-scenario comparison (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
 npm run benchmark:streaming      # 7-scenario comparison (Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams)
 npm run benchmark:bfj            # 5-scenario comparison (Piffero vs bfj)
+npm run benchmark:200mb          # 8-scenario 200 MiB scale comparison across all 7 libraries
 ```
 
 ## PERFORMANCE
 
-Benchmarks run on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.json`) against 7 libraries (`Oboe`, `@streamparser/json`, `@sapientpro/json-stream`, `stream-json`, `json-web-streams`, `bfj`, and in-memory `jsonpath-plus`).
+Benchmarks run on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.json`)—plus a 200 MiB scaled dataset (`npm run benchmark:200mb`)—against 7 libraries (`Oboe`, `@streamparser/json`, `@sapientpro/json-stream`, `stream-json`, `json-web-streams`, `bfj`, and in-memory `jsonpath-plus`).
 
 ### Summary
 
@@ -231,6 +232,7 @@ Benchmarks run on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.js
 
 ### Full Reports & Detailed Matrices
 
+- [200 MiB Scale Comparison (7 Libraries)](./docs/benchmarks/scale-200mb.md)
 - [Streaming Parsers Comparison (`@sapientpro/json-stream`, `stream-json`, `json-web-streams`)](./docs/benchmarks/streaming-parsers.md)
 - [Extended 9-Scenario Comparison (`Oboe`, `@streamparser/json`, `jsonpath-plus`)](./docs/benchmarks/general-comparison.md)
 - [`Piffero vs bfj` Comparison](./docs/benchmarks/bfj-comparison.md)
