@@ -209,51 +209,67 @@ app.listen(3000, () => {
 ```bash
 npm run build                    # Compile TypeScript to ./dist
 npm test                         # Run Jasmine test suite
-npm run benchmark                # Run Benchmark.Suite (Piffero vs Oboe vs @streamparser/json)
-npm run benchmark:compare        # Run extended 9-scenario comparison (Piffero vs Oboe vs @streamparser/json)
+npm run benchmark                # Run Benchmark.Suite (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
+npm run benchmark:compare        # Run extended 9-scenario comparison (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
+npm run benchmark:bfj            # Run Piffero vs bfj comparison (38 MB JSON)
 node benchmarking/compare-oboe.js # Run 8-scenario Piffero vs Oboe suite (38 MB JSON)
 ```
 
 ## PERFORMANCE
 
-Benchmarks compare **Piffero** against [Oboe](https://github.com/jimhigson/oboe.js) and [@streamparser/json](https://www.npmjs.com/package/@streamparser/json) (`keepStack: false`) on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.json`).
+Benchmarks compare **Piffero** against [Oboe](https://github.com/jimhigson/oboe.js), [@streamparser/json](https://www.npmjs.com/package/@streamparser/json) (`keepStack: false`), [jsonpath-plus](https://www.npmjs.com/package/jsonpath-plus) (`readFile` + `JSON.parse` + `JSONPath`), and [bfj](https://www.npmjs.com/package/bfj) (`bfj.match`) on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.json`).
 
 ### Extended comparison (`npm run benchmark:compare`)
 
-Scenario (matches extracted)                               | Piffero (stream)        | Piffero (string)        | Oboe                    | @streamparser/json
------------------------------------------------------------|-------------------------|-------------------------|-------------------------|------------------------
-Early file `$.[1].payload` (1)                             | 4.95 ms (202.07 ops/s)  | 1.10 ms (912.35 ops/s)  | 10.77 ms (92.82 ops/s)  | 13.28 ms (75.31 ops/s)
-Mid file `$.[5000].payload` (1)                            | 157.55 ms median        | 156.70 ms (6.38 ops/s)  | 475.31 ms (2.10 ops/s)  | 231.41 ms (4.32 ops/s)
-End file `$.[11350]...received_events_url` (1)             | 349.66 ms (2.86 ops/s)  | 346.25 ms (2.89 ops/s)  | 651.13 ms (1.54 ops/s)  | 468.88 ms (2.13 ops/s)
-Root array elements `$[*]` (11,351)                        | 801.44 ms (1.25 ops/s)  | 1100.25 ms (0.91 ops/s) | 700.56 ms (1.43 ops/s)  | 436.08 ms (2.29 ops/s)
-Wildcard shallow `$[*].actor.login` (11,351)               | 447.07 ms (2.24 ops/s)  | 457.68 ms (2.18 ops/s)  | 664.51 ms (1.50 ops/s)  | 496.00 ms (2.02 ops/s)
-Nested wildcard `$[*].payload.commits[*].author.email` (10,109) | 423.77 ms (2.36 ops/s) | 425.41 ms (2.35 ops/s) | 666.79 ms (1.50 ops/s)  | 507.21 ms (1.97 ops/s)
-Recursive descent `$..user.login` (4,272)                  | 438.48 ms (2.28 ops/s)  | 484.33 ms (2.06 ops/s)  | 675.62 ms (1.48 ops/s)  | N/A (unsupported)
-Recursive + wildcard `$..commits[*].sha` (10,109)          | 472.82 ms (2.11 ops/s)  | 506.53 ms (1.97 ops/s)  | 610.58 ms (1.64 ops/s)  | N/A (unsupported)
-Existence filter vs duck-typing (1,389)                    | 603.49 ms (1.66 ops/s)  | 651.73 ms (1.53 ops/s)  | 634.71 ms (1.58 ops/s)  | N/A (unsupported)
+Scenario (matches extracted)                               | Piffero (stream)        | Piffero (string)        | Oboe                    | @streamparser/json     | jsonpath-plus (in-memory)
+-----------------------------------------------------------|-------------------------|-------------------------|-------------------------|------------------------|--------------------------
+Early file `$.[1].payload` (1)                             | 5.16 ms (193.68 ops/s)  | **1.05 ms** (950.58 ops/s) | 11.17 ms (89.49 ops/s)  | 14.33 ms (69.80 ops/s) | 506.67 ms (1.97 ops/s)
+Mid file `$.[5000].payload` (1)                            | **152.39 ms** (6.56 ops/s) | 154.78 ms (6.46 ops/s) | 456.73 ms (2.19 ops/s)  | 208.64 ms (4.79 ops/s) | 192.52 ms (5.19 ops/s)
+End file `$.[11350]...received_events_url` (1)             | 326.92 ms (3.06 ops/s)  | 307.37 ms (3.25 ops/s)  | 641.68 ms (1.56 ops/s)  | 484.39 ms (2.06 ops/s) | **192.57 ms** (5.19 ops/s)
+Root array elements `$[*]` (11,351)                        | 782.44 ms (1.28 ops/s)  | 872.91 ms (1.15 ops/s)  | 644.34 ms (1.55 ops/s)  | 404.21 ms (2.47 ops/s) | **200.57 ms** (4.99 ops/s)
+Wildcard shallow `$[*].actor.login` (11,351)               | 414.60 ms (2.41 ops/s)  | 420.86 ms (2.38 ops/s)  | 673.17 ms (1.49 ops/s)  | 476.42 ms (2.10 ops/s) | **232.16 ms** (4.31 ops/s)
+Nested wildcard `$[*].payload.commits[*].author.email` (10,109) | **447.17 ms** (2.24 ops/s) | 480.17 ms (2.08 ops/s) | 607.29 ms (1.65 ops/s) | 496.08 ms (2.02 ops/s) | 507.93 ms (1.97 ops/s)
+Recursive descent `$..user.login` (4,272)                  | 484.20 ms (2.07 ops/s)  | 442.42 ms (2.26 ops/s)  | 610.31 ms (1.64 ops/s)  | N/A (unsupported)      | **291.56 ms** (3.43 ops/s)
+Recursive + wildcard `$..commits[*].sha` (10,109)          | 492.12 ms (2.03 ops/s)  | 465.11 ms (2.15 ops/s)  | 664.31 ms (1.51 ops/s)  | N/A (unsupported)      | **344.00 ms** (2.91 ops/s)
+Existence filter vs duck-typing (1,389)                    | 678.07 ms (1.47 ops/s)  | 644.61 ms (1.55 ops/s)  | 611.49 ms (1.64 ops/s)  | N/A (unsupported)      | **285.41 ms** (3.50 ops/s)
 
-- Piffero outperforms both Oboe and `@streamparser/json` on early-exit queries and selective wildcards (even while the benchmark parses Piffero's JSON string output back with `JSON.parse`).
-- When extracting every full 38 MB root object (`$[*]`), `@streamparser/json` is faster in this harness because it emits JS objects directly without Piffero's JSON serialization + `JSON.parse` round-trip.
-- Unlike `@streamparser/json` (whose `paths` option supports only `$`, property segments, and `*`), Piffero natively supports recursive descent (`..`), filters (`?()`), slices, unions, and script expressions.
+### Piffero vs bfj (`npm run benchmark:bfj`)
+
+Scenario (matches extracted)                               | Piffero (stream)         | Piffero (string)            | bfj (`bfj.match`)
+-----------------------------------------------------------|--------------------------|-----------------------------|--------------------------
+Early file `$.[1].payload` vs predicate (1)                | 5.89 ms (169.87 ops/s)   | **0.89 ms** (1124.97 ops/s) | 4.10 ms (244.20 ops/s)
+Mid file `$.[5000].payload` vs predicate (1)               | 157.58 ms (6.35 ops/s)   | **151.84 ms** (6.59 ops/s)  | 4156.29 ms (0.24 ops/s)
+Root array elements `$[*]` vs depth-1 predicate (11,351)   | **750.76 ms** (1.33 ops/s) | 951.80 ms (1.05 ops/s)    | 10295.22 ms (0.10 ops/s)
+Recursive key `$..login` vs key selector `'login'` (21,151) | **469.57 ms** (2.13 ops/s) | 499.38 ms (2.00 ops/s)    | 10268.78 ms (0.10 ops/s)
+Existence filter `$[?(@.payload.issue)]...` (1,389)        | **621.14 ms** (1.61 ops/s) | 670.08 ms (1.49 ops/s)    | N/A (unsupported)
+
+- **Streaming vs. in-memory (`jsonpath-plus`)**: `jsonpath-plus` must read and `JSON.parse()` the entire 38 MB document into RAM before evaluating a query. On early-file queries (`[1].payload`), Piffero is **~480x faster** (`1.05 ms` vs `506.67 ms`), and also outperforms `jsonpath-plus` on mid-file queries (`[5000].payload`) and nested wildcards (`$[*].payload.commits[*].author.email`)—while keeping memory bounded even on files larger than RAM.
+- **Streaming vs. streaming (`Oboe`, `@streamparser/json`, and `bfj`)**: Piffero outperforms Oboe and `@streamparser/json` on early-exit queries, mid/end-file lookups, and selective wildcards (even while the benchmark parses Piffero's JSON string output back with `JSON.parse`), and is **13x–27x faster** than `bfj` on mid-file and full-file scans.
+- When extracting every full 38 MB root object (`$[*]`), `@streamparser/json` and `jsonpath-plus` are faster in this harness because they return JS objects directly without Piffero's JSON serialization + `JSON.parse` round-trip.
+- Unlike `@streamparser/json` (whose `paths` option supports only `$`, property segments, and `*`) and `bfj` (whose `match` drops `null` values due to Node object-mode EOF semantics and fails on nested array `$.` paths), Piffero natively supports recursive descent (`..`), filters (`?()`), slices, unions, and script expressions—with full output parity against `jsonpath-plus`, plus safe null-tolerant traversal of missing intermediate properties in filters (where `jsonpath-plus` throws `TypeError`).
 
 ### Feature comparison
 
-| Capability | Piffero | Oboe | @streamparser/json |
-|---|---|---|---|
-| Zero runtime dependencies | ✅ | ✅ | ✅ |
-| Node.js `Readable` stream output + backpressure | ✅ (`findByPath`) | ❌ (callback events) | ❌ (`@streamparser/json-node` wrapper needed) |
-| Direct JSON stream pass-through (no JS object alloc for unmatched branches) | ✅ | ❌ | ❌ |
-| Automatic early stream termination on deterministic queries | ✅ | Manual (`this.abort()`) | Manual (`stream.destroy()`) |
-| Child, array index, & wildcard (`*`) | ✅ | ✅ | ✅ |
-| Recursive descent (`..`) | ✅ | ✅ | ❌ |
-| Array slices (`[start:end:step]`), negative indexes, unions (`[,]`) | ✅ | Partial | ❌ |
-| Compound filters (`?()`) & script expressions (`()`) | ✅ | Duck-typing `{prop}` only | ❌ |
-| Built-in TypeScript declarations | ✅ | ❌ (DefinitelyTyped) | ✅ |
+| Capability | Piffero | Oboe | @streamparser/json | bfj | jsonpath-plus |
+|---|---|---|---|---|---|
+| Streaming (files larger than RAM) | ✅ | ✅ | ✅ | ✅ | ❌ (full `JSON.parse` in RAM) |
+| Zero runtime dependencies | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Node.js `Readable` stream output + backpressure | ✅ (`findByPath`) | ❌ (callback events) | ❌ (`@streamparser/json-node` wrapper needed) | ✅ (object mode, skips `null`) | ❌ |
+| Direct JSON stream pass-through (no JS object alloc for unmatched branches) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Automatic early stream termination on deterministic queries | ✅ | Manual (`this.abort()`) | Manual (`stream.destroy()`) | Manual (`destroy()`) | ❌ |
+| Child, array index, & wildcard (`*`) | ✅ | ✅ | ✅ | Partial (key/predicate; `$.` paths broken on arrays in v9) | ✅ |
+| Recursive descent (`..`) | ✅ | ✅ | ❌ | Key-only (`'prop'`) | ✅ |
+| Array slices (`[start:end:step]`), negative indexes, unions (`[,]`) | ✅ | Partial | ❌ | ❌ | ✅ |
+| Compound filters (`?()`) & script expressions (`()`) | ✅ | Duck-typing `{prop}` only | ❌ | Predicate fn only | ✅ |
+| Safe missing intermediate property access in filters | ✅ | N/A | N/A | N/A | ❌ (throws `TypeError`) |
+| Built-in TypeScript declarations | ✅ | ❌ (DefinitelyTyped) | ✅ | ❌ | ✅ |
 
 ## Other tools
 * Piffero is built on [Clarinet](https://github.com/dscape/clarinet)
 * You can try [Oboe](https://github.com/jimhigson/oboe.js)
 * You can try [@streamparser/json](https://www.npmjs.com/package/@streamparser/json)
+* You can try [bfj](https://www.npmjs.com/package/bfj)
+* You can try [jsonpath-plus](https://www.npmjs.com/package/jsonpath-plus)
 * You can also try [JSONPath Online Evaluator](https://jsonpath.com/)
 
 enjoy Piffero!!
