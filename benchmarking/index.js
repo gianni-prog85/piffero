@@ -11,6 +11,7 @@ var suite = new Benchmark.Suite;
 // JsonPath streaming libs
 var oboe = require('./oboe-node.js');
 var JSONParser = require('@streamparser/json').JSONParser;
+var JSONPath = require('jsonpath-plus').JSONPath;
 var Piffero = require('../dist/index.js').Piffero;
 
 // config
@@ -64,6 +65,14 @@ suite.add('Piffero (stream)',{
         });
         stream.on('end', function () {
             if (!settled && !parser.isEnded) parser.end();
+        });
+    }
+}).add('jsonpath-plus (in-memory)', {
+    defer: true,
+    fn: function (deferred) {
+        fs.promises.readFile(JSON_FILE, 'utf8').then(function (raw) {
+            JSONPath({ path: '$' + JSON_PATH, json: JSON.parse(raw) });
+            deferred.resolve();
         });
     }
 })

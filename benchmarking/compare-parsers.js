@@ -1,5 +1,5 @@
 /**
- * Extended Piffero vs Oboe vs @streamparser/json benchmark suite on 38MB spec/jsonFiles/large-file.json
+ * Extended Piffero vs Oboe vs @streamparser/json vs jsonpath-plus benchmark suite on 38MB spec/jsonFiles/large-file.json
  * RUN: node benchmarking/compare-parsers.js
  */
 const fs = require("fs");
@@ -8,6 +8,7 @@ const { performance } = require("perf_hooks");
 
 const oboe = require("./oboe-node.js");
 const { JSONParser } = require("@streamparser/json");
+const { JSONPath } = require("jsonpath-plus");
 const { Piffero } = require("../dist/index.js");
 
 const JSON_FILE = path.join(__dirname, "../spec/jsonFiles/large-file.json");
@@ -111,6 +112,14 @@ function runStreamParser(paths, abortOnFirst) {
   });
 }
 
+async function runJsonPathPlus(jsonPath) {
+  const start = performance.now();
+  const raw = await fs.promises.readFile(JSON_FILE, "utf8");
+  const json = JSON.parse(raw);
+  const res = JSONPath({ path: jsonPath, json });
+  return { ms: performance.now() - start, count: res.length };
+}
+
 async function bench(label, fn, runs) {
   await fn(); // warmup
   const times = [];
@@ -139,6 +148,7 @@ async function main() {
       piffero: "$.[1].payload",
       oboe: "![1].payload",
       streamparser: ["$.1.payload"],
+      jsonpathPlus: "$[1].payload",
       abortOnFirst: true,
       runs: 10,
     },
@@ -147,6 +157,7 @@ async function main() {
       piffero: "$.[5000].payload",
       oboe: "![5000].payload",
       streamparser: ["$.5000.payload"],
+      jsonpathPlus: "$[5000].payload",
       abortOnFirst: true,
       runs: 5,
     },
@@ -155,6 +166,7 @@ async function main() {
       piffero: "$.[11350].payload.issue.user.received_events_url",
       oboe: "![11350].payload.issue.user.received_events_url",
       streamparser: ["$.11350.payload.issue.user.received_events_url"],
+      jsonpathPlus: "$[11350].payload.issue.user.received_events_url",
       abortOnFirst: true,
       runs: 5,
     },
@@ -163,6 +175,7 @@ async function main() {
       piffero: "$[*]",
       oboe: "![*]",
       streamparser: ["$.*"],
+      jsonpathPlus: "$[*]",
       abortOnFirst: false,
       runs: 3,
     },
@@ -171,6 +184,7 @@ async function main() {
       piffero: "$[*].actor.login",
       oboe: "![*].actor.login",
       streamparser: ["$.*.actor.login"],
+      jsonpathPlus: "$[*].actor.login",
       abortOnFirst: false,
       runs: 3,
     },
@@ -179,6 +193,7 @@ async function main() {
       piffero: "$[*].payload.commits[*].author.email",
       oboe: "![*].payload.commits[*].author.email",
       streamparser: ["$.*.payload.commits.*.author.email"],
+      jsonpathPlus: "$[*].payload.commits[*].author.email",
       abortOnFirst: false,
       runs: 3,
     },
@@ -187,6 +202,7 @@ async function main() {
       piffero: "$..user.login",
       oboe: "..user.login",
       streamparser: null,
+      jsonpathPlus: "$..user.login",
       abortOnFirst: false,
       runs: 3,
     },
@@ -195,6 +211,7 @@ async function main() {
       piffero: "$..commits[*].sha",
       oboe: "..commits[*].sha",
       streamparser: null,
+      jsonpathPlus: "$..commits[*].sha",
       abortOnFirst: false,
       runs: 3,
     },
@@ -203,6 +220,7 @@ async function main() {
       piffero: "$[?(@.payload.issue)].payload.issue.number",
       oboe: "![*].payload{issue}.issue.number",
       streamparser: null,
+      jsonpathPlus: "$[?(@.payload.issue)].payload.issue.number",
       abortOnFirst: false,
       runs: 3,
     },
@@ -221,8 +239,9 @@ async function main() {
           opsSec: "N/A",
           matches: "N/A (unsupported)",
         };
+    const jp = await bench("jsonpath-plus (in-memory)", () => runJsonPathPlus(c.jsonpathPlus), c.runs);
     console.log(`\n=== ${c.name} ===`);
-    console.table([pStream, pString, ob, sp]);
+    console.table([pStream, pString, ob, sp, jp]);
   }
 }
 
