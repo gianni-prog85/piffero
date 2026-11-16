@@ -15,25 +15,27 @@ Questo documento definisce la roadmap evolutiva di **Piffero**, il parser JSON S
 ## Fase 1 — Ottimizzazione Core & Affidabilità (v1.2.0)
 Focus su prestazioni su file di grandi dimensioni, riduzione allocazioni e gestione corretta degli stream Node.js.
 
-- [ ] **#1 — Eliminare il doppio parsing ricorsivo nei JSONPath con condizioni**
+- [x] **#1 — Eliminare il doppio parsing ricorsivo nei JSONPath con condizioni**
   Evitare la creazione di un secondo `MasterHandler` + `CStream` quando una condizione è seguita da ulteriori segmenti di percorso.
-- [ ] **#2 — Sostituire concatenazioni di stringhe (`+=`) e `push()` per singolo token**
+- [x] **#2 — Sostituire concatenazioni di stringhe (`+=`) e `push()` per singolo token**
   Introdurre bufferizzazione basata su array (`string[]` + `join`) e chunking minimo configurabile prima di `stream.push()`.
-- [ ] **#3 — Calcolo O(1) per slice/unioni in `buildParsedPath`**
+- [x] **#3 — Calcolo O(1) per slice/unioni in `buildParsedPath`**
   Eliminare la materializzazione dell'array `indexes` per i range `[start:end:step]` e usare `Set<number>` per le unioni esplicite.
-- [ ] **#4 — Gestione backpressure e `StringDecoder` nativo in `CStream`**
+- [x] **#4 — Gestione backpressure e `StringDecoder` nativo in `CStream`**
   Rispettare il valore di ritorno di `output.push()` con `pause()`/`resume()` sullo stream sorgente e sostituire il decoder UTF-8 manuale con `string_decoder`.
-- [ ] **#5 — Pulizia dipendenze e propagazione errori su stream**
+- [x] **#5 — Pulizia dipendenze e propagazione errori su stream**
   Rimuovere `underscore` (inutilizzato), alleggerire `ConditionEval` (riducendo la dipendenza da `esprima`/`static-eval`) e propagare gli errori tramite `output.destroy(err)` in modalità stream.
 
 ---
 
 ## Fase 2 — Completamento Sintassi JSONPath (v1.3.0)
-Allineamento alle specifiche JSONPath complete descritte nel `README.md`:
+Allineamento alle specifiche JSONPath complete descritte nel `README.md` (OpenSpec `complete-jsonpath-syntax`):
 
-- [ ] **Wildcard `*`** (es. `$.employees[*].name`, `$.*`).
-- [ ] **Recursive descent `..`** (es. `$..phoneNumbers`).
-- [ ] **Filtri ed espressioni complete `?()` e `()`**: supporto a operatori di confronto (`!=`, `>`, `<`, `>=`, `<=`), operatori logici (`&&`, `||`) e proprietà annidate (`@.address.city`).
+- [ ] **#8 — Wildcard `*`** (es. `$.employees[*].name`, `$.*`).
+- [ ] **#9 — Recursive descent `..`** (es. `$..phoneNumbers`, `$.employees..type`).
+- [ ] **#10 — Filtri completi `?()`**: supporto a operatori di confronto (`!=`, `!==`, `==`, `>`, `<`, `>=`, `<=`), operatori logici (`&&`, `||`, `!`) e verifica di esistenza proprietà.
+- [ ] **#11 — Operatore elemento corrente `@`**: riferimento diretto su primitivi (`[?(@ > 10)]`) e proprietà annidate (`@.address.city`).
+- [ ] **#12 — Script expression `()`**: valutazione espressioni subscript (es. `[(1+1)]`, `[(@.length-1)]`).
 
 ---
 
