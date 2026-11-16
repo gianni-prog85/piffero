@@ -1,5 +1,6 @@
 import { MasterHandler } from "./../../handler/mastehandler";
 import { Writable } from "stream";
+import { StringDecoder } from "string_decoder";
 
 const Char = {
   tab: 0x09, // \t
@@ -465,14 +466,7 @@ export class CStream extends Writable {
   _parser: CParser;
   readable = true;
   handler: MasterHandler;
-  bytes_remaining = 0; // number of bytes remaining in multi byte utf8 char to read after split boundary
-  bytes_in_sequence = 0; // bytes in multi byte utf8 char to read
-  temp_buffs = {
-    2: Buffer.alloc(2),
-    3: Buffer.alloc(3),
-    4: Buffer.alloc(4),
-  }; // for rebuilding chars split before boundary is reached
-  string = "";
+  private decoder = new StringDecoder("utf8");
 
   constructor(handler: MasterHandler, opt?) {
     super(opt);
@@ -503,70 +497,21 @@ export class CStream extends Writable {
     };
   }
 
-  write(data) {
-    const l = data.length;
-    const tbbis = this.temp_buffs[this.bytes_in_sequence];
-    for (let i = 0; i < l; i++) {
-      let n = data[i];
-      // check for carry over of a multi byte char split between data chunks
-      // & fill temp buffer it with start of this data chunk up to the boundary limit set in the last iteration
-      if (this.bytes_remaining > 0) {
-        const diffBytes = this.bytes_in_sequence - this.bytes_remaining;
-        for (var j = 0, e = this.bytes_remaining; j < e; j++) {
-          tbbis[diffBytes + j] = data[j];
-        }
-        this.string = "" + tbbis;
-        this.bytes_in_sequence = this.bytes_remaining = 0;
-
-        // move iterator forward by number of byte read during sequencing
-        i = i + j - 1;
-
-        // pass data to parser and move forward to parse rest of data
-        this._parser.write(this.string);
-        continue;
-      }
-
-      // if no remainder bytes carried over, parse multi byte (>=128) chars one at a time
-      if (this.bytes_remaining === 0 && n >= 128) {
-        if (n <= 223 && n >= 194) {
-          this.bytes_in_sequence = 2;
-        } else if (n <= 239 && n >= 224) {
-          this.bytes_in_sequence = 3;
-        } else if (n <= 244 && n >= 240) {
-          this.bytes_in_sequence = 4;
-        }
-        const bytes_in_sequence_i = this.bytes_in_sequence + i;
-        if (bytes_in_sequence_i > data.length) {
-          // if bytes needed to complete char fall outside data length, we have a boundary split
-          for (var k = 0, length = l - 1 - i; k <= length; k++) {
-            tbbis[k] = data[i + k]; // fill temp data of correct size with bytes available in this chunk
-          }
-
-          this.bytes_remaining = bytes_in_sequence_i - data.length;
-
-          // immediately return as we need another chunk to sequence the character
-          return true;
-        } else {
-          this.string = "" + data.slice(i, bytes_in_sequence_i);
-          i = bytes_in_sequence_i - 1;
-
-          this._parser.write(this.string);
-          continue;
-        }
-      }
-
-      // is there a range of characters that are immediately parsable?
-      for (var p = i; p < l; p++) {
-        if (data[p] >= 128) break;
-      }
-      this.string = "" + data.slice(i, p);
-      this._parser.write(this.string);
-      i = p - 1;
+  write(data): boolean {
+    const str = typeof data === "string" ? data : this.decoder.write(data);
+    if (str.length > 0) {
+      this._parser.write(str);
     }
+    return true;
   }
 
-  end(chunk) {
-    if (chunk) this._parser.write("" + chunk);
+  end(chunk?) {
+    if (chunk) {
+      const str = typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+      if (str.length > 0) this._parser.write(str);
+    }
+    const remaining = this.decoder.end();
+    if (remaining.length > 0) this._parser.write(remaining);
     this._parser.end();
     this.endParser();
   }
