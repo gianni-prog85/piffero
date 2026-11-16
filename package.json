@@ -23,7 +23,8 @@
     "dev": "node --inspect=5858 -r ts-node/register dev/index.ts",
     "benchmark": "npm run build && cd benchmarking && node index.js",
     "benchmark:compare": "npm run build && node benchmarking/compare-parsers.js",
-    "benchmark:bfj": "npm run build && node benchmarking/compare-bfj.js"
+    "benchmark:bfj": "npm run build && node benchmarking/compare-bfj.js",
+    "benchmark:streaming": "npm run build && node benchmarking/compare-streaming.js"
   },
   "repository": {
     "type": "git",
@@ -47,6 +48,7 @@
   },
   "homepage": "https://github.com/gfiorentino/piffero#readme",
   "devDependencies": {
+    "@sapientpro/json-stream": "^3.0.0",
     "@streamparser/json": "^0.0.26",
     "@types/jasmine": "^3.10.2",
     "@types/node": "^17.0.0",
@@ -62,10 +64,12 @@
     "jasmine": "^3.10.0",
     "jasmine-spec-reporter": "^7.0.0",
     "jasmine-ts": "^0.4.0",
+    "json-web-streams": "^1.2.0",
     "jsonpath-plus": "^11.3.0",
     "nodemon": "^2.0.15",
     "nyc": "^15.1.0",
     "prettier": "^2.5.1",
+    "stream-json": "^3.9.0",
     "ts-loader": "^9.2.6",
     "ts-node": "^10.4.0",
     "tslint": "^6.1.3",
