@@ -11,19 +11,19 @@ npm run benchmark
 
 | Scenario (matches extracted) | Piffero (stream) | Piffero (string) | Oboe | `@streamparser/json` | `jsonpath-plus` (in-memory) |
 |---|---|---|---|---|---|
-| Early file `$.[1].payload` (1) | 5.16 ms (193.68 ops/s) | **1.05 ms** (950.58 ops/s) | 11.17 ms (89.49 ops/s) | 14.33 ms (69.80 ops/s) | 506.67 ms (1.97 ops/s) |
-| Mid file `$.[5000].payload` (1) | **152.39 ms** (6.56 ops/s) | 154.78 ms (6.46 ops/s) | 456.73 ms (2.19 ops/s) | 208.64 ms (4.79 ops/s) | 192.52 ms (5.19 ops/s) |
-| End file `$.[11350]...received_events_url` (1) | 326.92 ms (3.06 ops/s) | 307.37 ms (3.25 ops/s) | 641.68 ms (1.56 ops/s) | 484.39 ms (2.06 ops/s) | **192.57 ms** (5.19 ops/s) |
-| Root array elements `$[*]` (11,351) | 782.44 ms (1.28 ops/s) | 872.91 ms (1.15 ops/s) | 644.34 ms (1.55 ops/s) | 404.21 ms (2.47 ops/s) | **200.57 ms** (4.99 ops/s) |
-| Wildcard shallow `$[*].actor.login` (11,351) | 414.60 ms (2.41 ops/s) | 420.86 ms (2.38 ops/s) | 673.17 ms (1.49 ops/s) | 476.42 ms (2.10 ops/s) | **232.16 ms** (4.31 ops/s) |
-| Nested wildcard `$[*].payload.commits[*].author.email` (10,109) | **447.17 ms** (2.24 ops/s) | 480.17 ms (2.08 ops/s) | 607.29 ms (1.65 ops/s) | 496.08 ms (2.02 ops/s) | 507.93 ms (1.97 ops/s) |
-| Recursive descent `$..user.login` (4,272) | 484.20 ms (2.07 ops/s) | 442.42 ms (2.26 ops/s) | 610.31 ms (1.64 ops/s) | N/A (unsupported) | **291.56 ms** (3.43 ops/s) |
-| Recursive + wildcard `$..commits[*].sha` (10,109) | 492.12 ms (2.03 ops/s) | 465.11 ms (2.15 ops/s) | 664.31 ms (1.51 ops/s) | N/A (unsupported) | **344.00 ms** (2.91 ops/s) |
-| Existence filter vs duck-typing (1,389) | 678.07 ms (1.47 ops/s) | 644.61 ms (1.55 ops/s) | 611.49 ms (1.64 ops/s) | N/A (unsupported) | **285.41 ms** (3.50 ops/s) |
+| Early file `$.[1].payload` (1) | 1.18 ms (848.90 ops/s) | **0.79 ms** (1258.64 ops/s) | 15.45 ms (64.72 ops/s) | 18.25 ms (54.79 ops/s) | 686.08 ms (1.46 ops/s) |
+| Mid file `$.[5000].payload` (1) | 113.12 ms (8.84 ops/s) | **95.50 ms** (10.47 ops/s) | 551.78 ms (1.81 ops/s) | 276.18 ms (3.62 ops/s) | 240.05 ms (4.17 ops/s) |
+| End file `$.[11350]...received_events_url` (1) | 210.39 ms (4.75 ops/s) | **201.48 ms** (4.96 ops/s) | 768.18 ms (1.30 ops/s) | 623.42 ms (1.60 ops/s) | 418.05 ms (2.39 ops/s) |
+| Root array elements `$[*]` (11,351) | 651.75 ms (1.53 ops/s) | 603.66 ms (1.66 ops/s) | 845.62 ms (1.18 ops/s) | 542.56 ms (1.84 ops/s) | **254.00 ms** (3.94 ops/s) |
+| Wildcard shallow `$[*].actor.login` (11,351) | 265.00 ms (3.77 ops/s) | 260.60 ms (3.84 ops/s) | 795.80 ms (1.26 ops/s) | 624.90 ms (1.60 ops/s) | **248.86 ms** (4.02 ops/s) |
+| Nested wildcard `$[*].payload.commits[*].author.email` (10,109) | 305.31 ms (3.28 ops/s) | 288.80 ms (3.46 ops/s) | 792.39 ms (1.26 ops/s) | 646.10 ms (1.55 ops/s) | **271.73 ms** (3.68 ops/s) |
+| Recursive descent `$..user.login` (4,272) | 479.85 ms (2.08 ops/s) | 476.67 ms (2.10 ops/s) | 800.98 ms (1.25 ops/s) | N/A (unsupported) | **310.04 ms** (3.23 ops/s) |
+| Recursive + wildcard `$..commits[*].sha` (10,109) | 488.18 ms (2.05 ops/s) | 487.01 ms (2.05 ops/s) | 797.08 ms (1.25 ops/s) | N/A (unsupported) | **310.92 ms** (3.22 ops/s) |
+| Existence filter vs duck-typing (1,389) | 307.55 ms (3.25 ops/s) | 310.46 ms (3.22 ops/s) | 776.80 ms (1.29 ops/s) | N/A (unsupported) | **261.61 ms** (3.82 ops/s) |
 
 ## Key Takeaways
 
-- **Streaming vs in-memory (`jsonpath-plus`)**: `jsonpath-plus` must read and `JSON.parse()` the entire 38 MB document into RAM before evaluating a query. On early-file queries (`$.[1].payload`), Piffero is **~480x faster** (`1.05 ms` vs `506.67 ms`) and also beats `jsonpath-plus` on mid-file queries (`152.39 ms` vs `192.52 ms`) and nested wildcards (`447.17 ms` vs `507.93 ms`)—with bounded memory on larger-than-RAM payloads.
+- **Streaming vs in-memory (`jsonpath-plus`)**: `jsonpath-plus` must read and `JSON.parse()` the entire 38 MB document into RAM before evaluating a query. On early-file queries (`$.[1].payload`), Piffero is **~868x faster** (`0.79 ms` vs `686.08 ms`), and beats `jsonpath-plus` on both mid-file (`95.50 ms` vs `240.05 ms`, **~2.5x**) and end-of-file point lookups (`201.48 ms` vs `418.05 ms`, **~2.1x**), while nearly matching in-memory `jsonpath-plus` on selective wildcards (`260.60 ms` vs `248.86 ms`) and nested wildcards (`288.80 ms` vs `271.73 ms`) with bounded memory.
 - **Safe nested filter traversal**: Where `jsonpath-plus` throws `TypeError` when an intermediate property in a filter path is missing (e.g. `@.address.city`), Piffero evaluates safely without crashing.
-- **Streaming vs Oboe / `@streamparser/json`**: Piffero outperforms both Oboe and `@streamparser/json` on early-exit, mid-file, end-file, selective wildcard, and recursive-descent queries, even when the harness pays a `JSON.parse` round-trip on Piffero's output.
+- **Streaming vs Oboe / `@streamparser/json`**: Piffero outperforms Oboe in **all 9 scenarios** (**~1.4x–19.6x faster**) and beats `@streamparser/json` in **5 of 6 supported scenarios** (**~2.2x–23.1x faster** on point lookups and selective wildcards, with `@streamparser/json` lacking `..` and `?()` support altogether), even while the harness pays a `JSON.parse` round-trip on Piffero's output.
 - Verified in Jasmine parity suites: [`streamparserParitySpec.ts`](../../spec/piffero/streamparserParitySpec.ts) and [`jsonpathPlusParitySpec.ts`](../../spec/piffero/jsonpathPlusParitySpec.ts).

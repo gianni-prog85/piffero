@@ -1,6 +1,18 @@
-import { MasterHandler } from "./../../handler/mastehandler";
 import { Writable } from "stream";
 import { StringDecoder } from "string_decoder";
+
+export interface SaxHandler {
+  skipDecode?: boolean;
+  onopenobject(node: any): void;
+  oncloseobject(): void;
+  onopenarray(): void;
+  onclosearray(): void;
+  onkey(node: any): void;
+  onvalue(node: any): void;
+  onend(): void;
+  onclose(): void;
+  onerror(er: any): void;
+}
 
 const Char = {
   tab: 0x09, // \t
@@ -69,37 +81,36 @@ const STATE = {
   NUMBER_DIGIT: _S++, // [0-9]
 };
 
-for (var s_ in STATE) STATE[STATE[s_]] = s_;
+for (const s_ in STATE) STATE[STATE[s_]] = s_;
 
-const stringTokenPattern = /[\\"\n]/g;
-
-// switcharoo
-let S = STATE;
+const S = STATE;
 
 class CParser {
-  opt;
-  handler: MasterHandler;
-  q = "";
-  c = "";
-  p = "";
+  opt: any;
+  handler: SaxHandler;
+  c: any = "";
+  p: any = "";
   closed = false;
   closedRoot = false;
   sawRoot = false;
   tag = null;
-  errorString = null;
+  errorString: any = null;
   state = S.BEGIN;
-  stack = new Array();
+  stack: number[] = [];
   column = 0;
   line = 1;
   slashed = false;
-  unicodeI = 0;
-  unicodeS = null;
   depth = 0;
-  onerror;
-  numberNode: string;
-  textNode: string;
+  onerror: any;
+  numberNode = "";
+  textNode: string | undefined = undefined;
+  private hasPendingText = false;
+  private pendingBuf: Buffer | null = null;
+  private pendingStart = 0;
+  private pendingEnd = 0;
+  private strDecoder: StringDecoder | null = null;
 
-  constructor(handler, opt?) {
+  constructor(handler: SaxHandler, opt?: any) {
     this.handler = handler;
     this.opt = opt ? opt : {};
     this.clearBuffers();
@@ -108,9 +119,12 @@ class CParser {
   clearBuffers() {
     this.textNode = undefined;
     this.numberNode = "";
+    this.hasPendingText = false;
+    this.pendingBuf = null;
+    this.strDecoder = null;
   }
 
-  isWhitespace(c) {
+  isWhitespace(c: number): boolean {
     return (
       c === Char.space ||
       c === Char.carriageReturn ||
@@ -119,41 +133,681 @@ class CParser {
     );
   }
 
-  write(chunk) {
+  writeBuffer(buf: Buffer) {
     if (this.errorString) throw this.errorString;
-    if (this.closed)
+    if (this.closed) {
       return this.error("Cannot write after close. Assign an onready handler.");
+    }
+    const len = buf.length;
+    if (len === 0) return this;
+
+    let i = 0;
+    let p: any = this.p;
+    let c: any = buf[0];
+    let line = this.line;
+    let col = this.column;
+    let nextSlash = -2;
+    const handler = this.handler;
+    const stack = this.stack;
+
+    while (i < len) {
+      p = c;
+      c = buf[i++];
+
+      if (c <= Char.space) {
+        if (c === Char.lineFeed) {
+          line++;
+          col = 0;
+        } else {
+          col++;
+        }
+      } else {
+        col++;
+      }
+
+      switch (this.state) {
+        case S.BEGIN:
+          if (c === Char.openBrace) this.state = S.OPEN_OBJECT;
+          else if (c === Char.openBracket) this.state = S.OPEN_ARRAY;
+          else if (
+            c !== Char.space &&
+            c !== Char.carriageReturn &&
+            c !== Char.lineFeed &&
+            c !== Char.tab
+          ) {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Non-whitespace before {[.");
+          }
+          continue;
+
+        case S.OPEN_KEY:
+        case S.OPEN_OBJECT:
+          if (
+            c === Char.space ||
+            c === Char.carriageReturn ||
+            c === Char.lineFeed ||
+            c === Char.tab
+          ) {
+            continue;
+          }
+          if (this.state === S.OPEN_KEY) {
+            stack.push(S.CLOSE_KEY);
+          } else {
+            if (c === Char.closeBrace) {
+              handler.onopenobject(undefined);
+              this.depth++;
+              handler.oncloseobject();
+              this.depth--;
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+              continue;
+            } else {
+              stack.push(S.CLOSE_OBJECT);
+            }
+          }
+          if (c === Char.doubleQuote) {
+            this.state = S.STRING;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error('Malformed object key should start with "');
+          }
+          continue;
+
+        case S.CLOSE_KEY:
+        case S.CLOSE_OBJECT:
+          if (
+            c === Char.space ||
+            c === Char.carriageReturn ||
+            c === Char.lineFeed ||
+            c === Char.tab
+          ) {
+            continue;
+          }
+          if (c === Char.colon) {
+            if (this.state === S.CLOSE_OBJECT) {
+              stack.push(S.CLOSE_OBJECT);
+              this.closeValue("onopenobject");
+              this.depth++;
+            } else {
+              this.closeValue("onkey");
+            }
+            this.state = S.VALUE;
+            if (this.closed) return this;
+          } else if (c === Char.closeBrace) {
+            this.closeValue("onvalue");
+            handler.oncloseobject();
+            this.depth--;
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else if (c === Char.comma) {
+            if (this.state === S.CLOSE_OBJECT) {
+              stack.push(S.CLOSE_OBJECT);
+            }
+            this.closeValue("onvalue");
+            this.state = S.OPEN_KEY;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Bad object");
+          }
+          continue;
+
+        case S.OPEN_ARRAY:
+        case S.VALUE:
+          if (
+            c === Char.space ||
+            c === Char.carriageReturn ||
+            c === Char.lineFeed ||
+            c === Char.tab
+          ) {
+            continue;
+          }
+          if (this.state === S.OPEN_ARRAY) {
+            handler.onopenarray();
+            this.depth++;
+            this.state = S.VALUE;
+            if (c === Char.closeBracket) {
+              handler.onclosearray();
+              this.depth--;
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+              continue;
+            } else {
+              stack.push(S.CLOSE_ARRAY);
+            }
+          }
+          if (c === Char.doubleQuote) {
+            this.state = S.STRING;
+          } else if (c === Char.openBrace) {
+            this.state = S.OPEN_OBJECT;
+          } else if (c === Char.openBracket) {
+            this.state = S.OPEN_ARRAY;
+          } else if (c === Char.t) {
+            if (
+              i + 2 < len &&
+              buf[i] === Char.r &&
+              buf[i + 1] === Char.u &&
+              buf[i + 2] === Char.e
+            ) {
+              i += 3;
+              col += 3;
+              c = Char.e;
+              handler.onvalue(handler.skipDecode ? "" : "true");
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+            } else {
+              this.state = S.TRUE;
+            }
+          } else if (c === Char.f) {
+            if (
+              i + 3 < len &&
+              buf[i] === Char.a &&
+              buf[i + 1] === Char.l &&
+              buf[i + 2] === Char.s &&
+              buf[i + 3] === Char.e
+            ) {
+              i += 4;
+              col += 4;
+              c = Char.e;
+              handler.onvalue(handler.skipDecode ? "" : "false");
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+            } else {
+              this.state = S.FALSE;
+            }
+          } else if (c === Char.n) {
+            if (
+              i + 2 < len &&
+              buf[i] === Char.u &&
+              buf[i + 1] === Char.l &&
+              buf[i + 2] === Char.l
+            ) {
+              i += 3;
+              col += 3;
+              c = Char.l;
+              handler.onvalue(handler.skipDecode ? "" : "null");
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+            } else {
+              this.state = S.NULL;
+            }
+          } else if (c === Char.minus) {
+            if (!handler.skipDecode) {
+              this.numberNode += "-";
+            }
+          } else if (Char._0 <= c && c <= Char._9) {
+            let j = i;
+            while (j < len) {
+              const d = buf[j];
+              if (d >= Char._0 && d <= Char._9) {
+                j++;
+              } else {
+                break;
+              }
+            }
+            if (
+              j < len &&
+              buf[j] !== Char.period &&
+              buf[j] !== Char.e &&
+              buf[j] !== Char.E &&
+              buf[j] !== Char.plus &&
+              buf[j] !== Char.minus
+            ) {
+              col += j - i;
+              if (handler.skipDecode) {
+                this.numberNode = "";
+                handler.onvalue("");
+              } else {
+                const num =
+                  this.numberNode.length > 0
+                    ? this.numberNode + buf.toString("ascii", i - 1, j)
+                    : buf.toString("ascii", i - 1, j);
+                this.numberNode = "";
+                handler.onvalue(num);
+              }
+              c = buf[j - 1];
+              i = j;
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
+            } else {
+              col += j - i;
+              if (!handler.skipDecode) {
+                this.numberNode += buf.toString("ascii", i - 1, j);
+              } else {
+                this.numberNode = "0";
+              }
+              c = buf[j - 1];
+              i = j;
+              this.state = S.NUMBER_DIGIT;
+            }
+          }
+          continue;
+
+        case S.CLOSE_ARRAY:
+          if (c === Char.comma) {
+            this.closeValue("onvalue");
+            stack.push(S.CLOSE_ARRAY);
+            this.state = S.VALUE;
+            if (this.closed) return this;
+          } else if (c === Char.closeBracket) {
+            this.closeValue("onvalue");
+            handler.onclosearray();
+            this.depth--;
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else if (
+            c === Char.space ||
+            c === Char.carriageReturn ||
+            c === Char.lineFeed ||
+            c === Char.tab
+          ) {
+            continue;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Bad array");
+          }
+          continue;
+
+        case S.STRING: {
+          let starti = i - 1;
+          const skipDecode = Boolean(handler.skipDecode);
+
+          if (this.slashed) {
+            this.slashed = false;
+            const esc = buf[starti];
+            if (!skipDecode) {
+              if (esc < 0x80) {
+                if (this.strDecoder) {
+                  this.textNode =
+                    (this.textNode || "") +
+                    this.strDecoder.end() +
+                    "\\" +
+                    String.fromCharCode(esc);
+                  this.strDecoder = null;
+                } else {
+                  this.textNode =
+                    (this.textNode || "") + "\\" + String.fromCharCode(esc);
+                }
+              } else {
+                if (!this.strDecoder) {
+                  this.strDecoder = new StringDecoder("utf8");
+                }
+                this.textNode =
+                  (this.textNode || "") +
+                  "\\" +
+                  this.strDecoder.write(buf.subarray(starti, starti + 1));
+              }
+            }
+            starti++;
+            if (starti >= len) {
+              i = len;
+              c = buf[len - 1];
+              continue;
+            }
+          }
+
+          if (nextSlash === -2 || (nextSlash !== -1 && nextSlash < starti)) {
+            nextSlash = buf.indexOf(Char.backslash, starti);
+          }
+          const quoteIdx = buf.indexOf(Char.doubleQuote, starti);
+
+          if (quoteIdx !== -1 && (nextSlash === -1 || nextSlash > quoteIdx)) {
+            if (!skipDecode) {
+              if (this.strDecoder) {
+                this.textNode =
+                  (this.textNode || "") +
+                  this.strDecoder.write(buf.subarray(starti, quoteIdx)) +
+                  this.strDecoder.end();
+                this.strDecoder = null;
+                this.pendingBuf = null;
+              } else if (this.textNode !== undefined) {
+                this.textNode += buf.toString("utf8", starti, quoteIdx);
+                this.pendingBuf = null;
+              } else {
+                this.pendingBuf = buf;
+                this.pendingStart = starti;
+                this.pendingEnd = quoteIdx;
+              }
+            }
+            this.hasPendingText = true;
+            c = Char.doubleQuote;
+            i = quoteIdx + 1;
+            this.state = stack.pop() || S.VALUE;
+            continue;
+          }
+
+          // Slow path: escapes or chunk-spanning string
+          while (starti < len) {
+            const q = buf.indexOf(Char.doubleQuote, starti);
+            if (nextSlash !== -1 && nextSlash < starti) {
+              nextSlash = buf.indexOf(Char.backslash, starti);
+            }
+            if (nextSlash !== -1 && (q === -1 || nextSlash < q)) {
+              if (!skipDecode) {
+                if (this.strDecoder) {
+                  this.textNode =
+                    (this.textNode || "") +
+                    this.strDecoder.write(buf.subarray(starti, nextSlash)) +
+                    this.strDecoder.end();
+                  this.strDecoder = null;
+                } else {
+                  this.textNode =
+                    (this.textNode || "") +
+                    buf.toString("utf8", starti, nextSlash);
+                }
+              }
+              if (nextSlash + 1 < len) {
+                const esc = buf[nextSlash + 1];
+                if (!skipDecode) {
+                  if (esc < 0x80) {
+                    this.textNode =
+                      (this.textNode || "") + "\\" + String.fromCharCode(esc);
+                  } else {
+                    if (!this.strDecoder) {
+                      this.strDecoder = new StringDecoder("utf8");
+                    }
+                    this.textNode =
+                      (this.textNode || "") +
+                      "\\" +
+                      this.strDecoder.write(
+                        buf.subarray(nextSlash + 1, nextSlash + 2)
+                      );
+                  }
+                }
+                starti = nextSlash + 2;
+                nextSlash = buf.indexOf(Char.backslash, starti);
+                continue;
+              } else {
+                this.slashed = true;
+                starti = len;
+                break;
+              }
+            } else if (q !== -1) {
+              if (!skipDecode) {
+                if (this.strDecoder) {
+                  this.textNode =
+                    (this.textNode || "") +
+                    this.strDecoder.write(buf.subarray(starti, q)) +
+                    this.strDecoder.end();
+                  this.strDecoder = null;
+                } else {
+                  this.textNode =
+                    (this.textNode || "") + buf.toString("utf8", starti, q);
+                }
+                this.pendingBuf = null;
+              }
+              this.hasPendingText = true;
+              c = Char.doubleQuote;
+              i = q + 1;
+              this.state = stack.pop() || S.VALUE;
+              break;
+            } else {
+              if (!skipDecode) {
+                if (!this.strDecoder) {
+                  this.strDecoder = new StringDecoder("utf8");
+                }
+                this.textNode =
+                  (this.textNode || "") +
+                  this.strDecoder.write(buf.subarray(starti));
+              }
+              starti = len;
+              i = len;
+              c = buf[len - 1];
+              break;
+            }
+          }
+          if (starti >= len) {
+            i = len;
+            c = buf[len - 1];
+          }
+          continue;
+        }
+
+        case S.TRUE:
+          if (c === Char.r) this.state = S.TRUE2;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with t" + c);
+          }
+          continue;
+
+        case S.TRUE2:
+          if (c === Char.u) this.state = S.TRUE3;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with tr" + c);
+          }
+          continue;
+
+        case S.TRUE3:
+          if (c === Char.e) {
+            handler.onvalue(handler.skipDecode ? "" : "true");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with tru" + c);
+          }
+          continue;
+
+        case S.FALSE:
+          if (c === Char.a) this.state = S.FALSE2;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with f" + c);
+          }
+          continue;
+
+        case S.FALSE2:
+          if (c === Char.l) this.state = S.FALSE3;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fa" + c);
+          }
+          continue;
+
+        case S.FALSE3:
+          if (c === Char.s) this.state = S.FALSE4;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fal" + c);
+          }
+          continue;
+
+        case S.FALSE4:
+          if (c === Char.e) {
+            handler.onvalue(handler.skipDecode ? "" : "false");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fals" + c);
+          }
+          continue;
+
+        case S.NULL:
+          if (c === Char.u) this.state = S.NULL2;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with n" + c);
+          }
+          continue;
+
+        case S.NULL2:
+          if (c === Char.l) this.state = S.NULL3;
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with nu" + c);
+          }
+          continue;
+
+        case S.NULL3:
+          if (c === Char.l) {
+            handler.onvalue(handler.skipDecode ? "" : "null");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with nul" + c);
+          }
+          continue;
+
+        case S.NUMBER_DECIMAL_POINT:
+          if (c === Char.period) {
+            if (!handler.skipDecode) this.numberNode += ".";
+            this.state = S.NUMBER_DIGIT;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Leading zero not followed by .");
+          }
+          continue;
+
+        case S.NUMBER_DIGIT:
+          if (Char._0 <= c && c <= Char._9) {
+            let j = i;
+            while (j < len) {
+              const d = buf[j];
+              if (d >= Char._0 && d <= Char._9) j++;
+              else break;
+            }
+            col += j - i;
+            if (!handler.skipDecode) {
+              this.numberNode += buf.toString("ascii", i - 1, j);
+            }
+            c = buf[j - 1];
+            i = j;
+          } else if (c === Char.period) {
+            if (this.numberNode.indexOf(".") !== -1) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
+              this.error("Invalid number has two dots");
+            }
+            this.numberNode += ".";
+          } else if (c === Char.e || c === Char.E) {
+            if (
+              this.numberNode.indexOf("e") !== -1 ||
+              this.numberNode.indexOf("E") !== -1
+            ) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
+              this.error("Invalid number has two exponential");
+            }
+            this.numberNode += "e";
+          } else if (c === Char.plus || c === Char.minus) {
+            if (!(p === Char.e || p === Char.E)) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
+              this.error("Invalid symbol in number");
+            }
+            if (!handler.skipDecode) {
+              this.numberNode += String.fromCharCode(c);
+            }
+          } else {
+            this.closeNumber();
+            i--; // go back one
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          }
+          continue;
+
+        default:
+          this.line = line;
+          this.column = col;
+          this.c = c;
+          this.error("Unknown state: " + this.state);
+      }
+    }
+
+    if (this.hasPendingText && this.pendingBuf !== null) {
+      if (!handler.skipDecode) {
+        this.textNode = this.pendingBuf.toString(
+          "utf8",
+          this.pendingStart,
+          this.pendingEnd
+        );
+      }
+      this.pendingBuf = null;
+    }
+
+    this.line = line;
+    this.column = col;
+    this.p = c;
+    this.c = NaN;
+    return this;
+  }
+
+  write(chunk: string) {
+    if (this.errorString) throw this.errorString;
+    if (this.closed) {
+      return this.error("Cannot write after close. Assign an onready handler.");
+    }
     if (chunk === null) {
       return this.end();
     }
-    var i: any = 0;
+    const len = chunk.length;
+    if (len === 0) return this;
+
+    let i = 0;
     let c: any = chunk.charCodeAt(0);
     let p: any = this.p;
-    while (c) {
+    let line = this.line;
+    let col = this.column;
+    let nextSlash = -2;
+    const handler = this.handler;
+    const stack = this.stack;
+
+    while (i < len) {
       p = c;
-      this.c = c = chunk.charCodeAt(i++);
-      // if chunk doesnt have next, like streaming char by char
-      // this way we need to check if previous is really previous
-      // if not we need to reset to what the parser says is the previous
-      // from buffer
-      if (p !== c) {
-        this.p = p;
+      c = chunk.charCodeAt(i++);
+
+      if (c === Char.lineFeed) {
+        line++;
+        col = 0;
       } else {
-        p = this.p;
+        col++;
       }
 
-      if (!c) break;
-      if (c === Char.lineFeed) {
-        this.line++;
-        this.column = 0;
-      } else {
-        this.column++;
-      }
       switch (this.state) {
         case S.BEGIN:
           if (c === Char.openBrace) this.state = S.OPEN_OBJECT;
           else if (c === Char.openBracket) this.state = S.OPEN_ARRAY;
           else if (!this.isWhitespace(c)) {
+            this.line = line;
+            this.column = col;
+            this.c = c;
             this.error("Non-whitespace before {[.");
           }
           continue;
@@ -161,61 +815,74 @@ class CParser {
         case S.OPEN_OBJECT:
           if (this.isWhitespace(c)) continue;
           if (this.state === S.OPEN_KEY) {
-            this.stack.push(S.CLOSE_KEY);
+            stack.push(S.CLOSE_KEY);
           } else {
             if (c === Char.closeBrace) {
-              this.handler.onopenobject(undefined);
+              handler.onopenobject(undefined);
               this.depth++;
-              this.handler.oncloseobject();
+              handler.oncloseobject();
               this.depth--;
-              this.state = this.stack.pop() || S.VALUE;
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
               continue;
-            } else this.stack.push(S.CLOSE_OBJECT);
+            } else stack.push(S.CLOSE_OBJECT);
           }
           if (c === Char.doubleQuote) this.state = S.STRING;
-          else this.error('Malformed object key should start with "');
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error('Malformed object key should start with "');
+          }
           continue;
 
         case S.CLOSE_KEY:
         case S.CLOSE_OBJECT:
           if (this.isWhitespace(c)) continue;
-          var event = this.state === S.CLOSE_KEY ? "key" : "object";
           if (c === Char.colon) {
             if (this.state === S.CLOSE_OBJECT) {
-              this.stack.push(S.CLOSE_OBJECT);
+              stack.push(S.CLOSE_OBJECT);
               this.closeValue("onopenobject");
               this.depth++;
             } else this.closeValue("onkey");
             this.state = S.VALUE;
+            if (this.closed) return this;
           } else if (c === Char.closeBrace) {
             this.closeValue("onvalue");
-
-            this.handler.oncloseobject();
+            handler.oncloseobject();
             this.depth--;
-            this.state = this.stack.pop() || S.VALUE;
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
           } else if (c === Char.comma) {
             if (this.state === S.CLOSE_OBJECT) {
-              this.stack.push(S.CLOSE_OBJECT);
+              stack.push(S.CLOSE_OBJECT);
             }
             this.closeValue("onvalue");
             this.state = S.OPEN_KEY;
-          } else this.error("Bad object");
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Bad object");
+          }
           continue;
 
-        case S.OPEN_ARRAY: // after an array there always a value
+        case S.OPEN_ARRAY:
         case S.VALUE:
           if (this.isWhitespace(c)) continue;
           if (this.state === S.OPEN_ARRAY) {
-            this.handler.onopenarray();
+            handler.onopenarray();
             this.depth++;
             this.state = S.VALUE;
             if (c === Char.closeBracket) {
-              this.handler.onclosearray();
+              handler.onclosearray();
               this.depth--;
-              this.state = this.stack.pop() || S.VALUE;
+              this.state = stack.pop() || S.VALUE;
+              if (this.closed) return this;
               continue;
             } else {
-              this.stack.push(S.CLOSE_ARRAY);
+              stack.push(S.CLOSE_ARRAY);
             }
           }
           if (c === Char.doubleQuote) this.state = S.STRING;
@@ -225,195 +892,315 @@ class CParser {
           else if (c === Char.f) this.state = S.FALSE;
           else if (c === Char.n) this.state = S.NULL;
           else if (c === Char.minus) {
-            // keep and continue
             this.numberNode += "-";
           } else if (Char._0 <= c && c <= Char._9) {
-            this.numberNode += String.fromCharCode(c);
+            let j = i;
+            while (j < len) {
+              const d = chunk.charCodeAt(j);
+              if (d >= Char._0 && d <= Char._9) j++;
+              else break;
+            }
+            col += j - i;
+            this.numberNode += chunk.slice(i - 1, j);
+            c = chunk.charCodeAt(j - 1);
+            i = j;
             this.state = S.NUMBER_DIGIT;
-          } // else this.error("Bad value"); // removed not needed for nested stream
+          }
           continue;
 
         case S.CLOSE_ARRAY:
           if (c === Char.comma) {
             this.closeValue("onvalue");
-            this.stack.push(S.CLOSE_ARRAY);
+            stack.push(S.CLOSE_ARRAY);
             this.state = S.VALUE;
+            if (this.closed) return this;
           } else if (c === Char.closeBracket) {
             this.closeValue("onvalue");
-            this.handler.onclosearray();
+            handler.onclosearray();
             this.depth--;
-            this.state = this.stack.pop() || S.VALUE;
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
           } else if (this.isWhitespace(c)) continue;
-          else this.error("Bad array");
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Bad array");
+          }
           continue;
 
-        case S.STRING:
-          if (this.textNode === undefined) {
-            this.textNode = "";
+        case S.STRING: {
+          let starti = i - 1;
+          const skipDecode = Boolean(handler.skipDecode);
+
+          if (this.slashed) {
+            this.slashed = false;
+            if (!skipDecode) {
+              this.textNode = (this.textNode || "") + "\\" + chunk[starti];
+            }
+            starti++;
+            if (starti >= len) {
+              i = len;
+              c = chunk.charCodeAt(len - 1);
+              continue;
+            }
           }
 
-          // thanks thejh, this is an about 50% performance improvement.
-          var starti = i - 1,
-            slashed = this.slashed,
-            unicodeI = this.unicodeI;
-          STRING_BIGLOOP: while (true) {
-            // zero means "no unicode active". 1-4 mean "parse some more". end after 4.
-            while (unicodeI > 0) {
-              this.unicodeS += String.fromCharCode(c);
-              c = chunk.charCodeAt(i++);
-              // this.position++;
-              if (unicodeI === 4) {
-                // TODO this might be slow? well, probably not used too often anyway
-                this.textNode += String.fromCharCode(
-                  parseInt(this.unicodeS, 16)
-                );
-                unicodeI = 0;
-                starti = i - 1;
+          if (nextSlash === -2 || (nextSlash !== -1 && nextSlash < starti)) {
+            nextSlash = chunk.indexOf("\\", starti);
+          }
+          const quoteIdx = chunk.indexOf('"', starti);
+
+          if (quoteIdx !== -1 && (nextSlash === -1 || nextSlash > quoteIdx)) {
+            if (!skipDecode) {
+              if (this.textNode !== undefined) {
+                this.textNode += chunk.slice(starti, quoteIdx);
               } else {
-                unicodeI++;
+                this.textNode = chunk.slice(starti, quoteIdx);
               }
-              // we can just break here: no stuff we skipped that still has to be sliced out or so
-              if (!c) break STRING_BIGLOOP;
             }
-            if (c === Char.doubleQuote && !slashed) {
-              this.state = this.stack.pop() || S.VALUE;
-              this.textNode += chunk.substring(starti, i - 1);
+            this.hasPendingText = true;
+            c = Char.doubleQuote;
+            i = quoteIdx + 1;
+            this.state = stack.pop() || S.VALUE;
+            continue;
+          }
+
+          while (starti < len) {
+            const q = chunk.indexOf('"', starti);
+            if (nextSlash !== -1 && nextSlash < starti) {
+              nextSlash = chunk.indexOf("\\", starti);
+            }
+            if (nextSlash !== -1 && (q === -1 || nextSlash < q)) {
+              if (!skipDecode) {
+                this.textNode =
+                  (this.textNode || "") + chunk.slice(starti, nextSlash);
+              }
+              if (nextSlash + 1 < len) {
+                if (!skipDecode) {
+                  this.textNode =
+                    (this.textNode || "") + "\\" + chunk[nextSlash + 1];
+                }
+                starti = nextSlash + 2;
+                nextSlash = chunk.indexOf("\\", starti);
+                continue;
+              } else {
+                this.slashed = true;
+                starti = len;
+                break;
+              }
+            } else if (q !== -1) {
+              if (!skipDecode) {
+                this.textNode = (this.textNode || "") + chunk.slice(starti, q);
+              }
+              this.hasPendingText = true;
+              c = Char.doubleQuote;
+              i = q + 1;
+              this.state = stack.pop() || S.VALUE;
               break;
-            }
-            if (c === Char.backslash && !slashed) {
-              slashed = true;
-              this.textNode += chunk.substring(starti, i - 1);
-              c = chunk.charCodeAt(i++);
-              if (!c) break;
-            }
-            if (slashed) {
-              this.textNode += "\\";
-              slashed = false;
-
-              this.textNode += String.fromCharCode(c);
-
-              c = chunk.charCodeAt(i++);
-              starti = i - 1;
-              if (!c) break;
-              else continue;
-            }
-
-            stringTokenPattern.lastIndex = i;
-            var reResult = stringTokenPattern.exec(chunk);
-            if (reResult === null) {
-              i = chunk.length + 1;
-              this.textNode += chunk.substring(starti, i - 1);
-              break;
-            }
-            i = reResult.index + 1;
-            c = chunk.charCodeAt(reResult.index);
-            if (!c) {
-              this.textNode += chunk.substring(starti, i - 1);
+            } else {
+              if (!skipDecode) {
+                this.textNode = (this.textNode || "") + chunk.slice(starti);
+              }
+              starti = len;
+              i = len;
+              c = chunk.charCodeAt(len - 1);
               break;
             }
           }
-          this.slashed = slashed;
-          this.unicodeI = unicodeI;
+          if (starti >= len) {
+            i = len;
+            c = chunk.charCodeAt(len - 1);
+          }
           continue;
+        }
 
         case S.TRUE:
           if (c === Char.r) this.state = S.TRUE2;
-          else this.error("Invalid true started with t" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with t" + c);
+          }
           continue;
 
         case S.TRUE2:
           if (c === Char.u) this.state = S.TRUE3;
-          else this.error("Invalid true started with tr" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with tr" + c);
+          }
           continue;
 
         case S.TRUE3:
           if (c === Char.e) {
-            this.handler.onvalue("true");
-            this.state = this.stack.pop() || S.VALUE;
-          } else this.error("Invalid true started with tru" + c);
+            handler.onvalue(handler.skipDecode ? "" : "true");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid true started with tru" + c);
+          }
           continue;
 
         case S.FALSE:
           if (c === Char.a) this.state = S.FALSE2;
-          else this.error("Invalid false started with f" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with f" + c);
+          }
           continue;
 
         case S.FALSE2:
           if (c === Char.l) this.state = S.FALSE3;
-          else this.error("Invalid false started with fa" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fa" + c);
+          }
           continue;
 
         case S.FALSE3:
           if (c === Char.s) this.state = S.FALSE4;
-          else this.error("Invalid false started with fal" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fal" + c);
+          }
           continue;
 
         case S.FALSE4:
           if (c === Char.e) {
-            this.handler.onvalue("false");
-            this.state = this.stack.pop() || S.VALUE;
-          } else this.error("Invalid false started with fals" + c);
+            handler.onvalue(handler.skipDecode ? "" : "false");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid false started with fals" + c);
+          }
           continue;
 
         case S.NULL:
           if (c === Char.u) this.state = S.NULL2;
-          else this.error("Invalid null started with n" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with n" + c);
+          }
           continue;
 
         case S.NULL2:
           if (c === Char.l) this.state = S.NULL3;
-          else this.error("Invalid null started with nu" + c);
+          else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with nu" + c);
+          }
           continue;
 
         case S.NULL3:
           if (c === Char.l) {
-            this.handler.onvalue("null");
-            this.state = this.stack.pop() || S.VALUE;
-          } else this.error("Invalid null started with nul" + c);
+            handler.onvalue(handler.skipDecode ? "" : "null");
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Invalid null started with nul" + c);
+          }
           continue;
 
         case S.NUMBER_DECIMAL_POINT:
           if (c === Char.period) {
             this.numberNode += ".";
             this.state = S.NUMBER_DIGIT;
-          } else this.error("Leading zero not followed by .");
+          } else {
+            this.line = line;
+            this.column = col;
+            this.c = c;
+            this.error("Leading zero not followed by .");
+          }
           continue;
 
         case S.NUMBER_DIGIT:
-          if (Char._0 <= c && c <= Char._9)
-            this.numberNode += String.fromCharCode(c);
-          else if (c === Char.period) {
-            if (this.numberNode.indexOf(".") !== -1)
+          if (Char._0 <= c && c <= Char._9) {
+            let j = i;
+            while (j < len) {
+              const d = chunk.charCodeAt(j);
+              if (d >= Char._0 && d <= Char._9) j++;
+              else break;
+            }
+            col += j - i;
+            this.numberNode += chunk.slice(i - 1, j);
+            c = chunk.charCodeAt(j - 1);
+            i = j;
+          } else if (c === Char.period) {
+            if (this.numberNode.indexOf(".") !== -1) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
               this.error("Invalid number has two dots");
+            }
             this.numberNode += ".";
           } else if (c === Char.e || c === Char.E) {
             if (
               this.numberNode.indexOf("e") !== -1 ||
               this.numberNode.indexOf("E") !== -1
-            )
+            ) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
               this.error("Invalid number has two exponential");
+            }
             this.numberNode += "e";
           } else if (c === Char.plus || c === Char.minus) {
-            if (!(p === Char.e || p === Char.E))
+            if (!(p === Char.e || p === Char.E)) {
+              this.line = line;
+              this.column = col;
+              this.c = c;
               this.error("Invalid symbol in number");
+            }
             this.numberNode += String.fromCharCode(c);
           } else {
             this.closeNumber();
             i--; // go back one
-            this.state = this.stack.pop() || S.VALUE;
+            this.state = stack.pop() || S.VALUE;
+            if (this.closed) return this;
           }
           continue;
 
         default:
+          this.line = line;
+          this.column = col;
+          this.c = c;
           this.error("Unknown state: " + this.state);
       }
     }
+    this.line = line;
+    this.column = col;
+    this.p = c;
+    this.c = NaN;
     return this;
   }
 
   end() {
-    if (this.state !== S.VALUE || this.depth !== 0)
+    if (this.state !== S.VALUE || this.depth !== 0) {
       this.error("Unexpected end");
+    }
 
     this.closeValue("onvalue");
     this.c = "";
@@ -422,21 +1209,42 @@ class CParser {
     return this;
   }
 
-  closeValue(event) {
-    if (this.textNode !== undefined) {
-      this.handler[event](`"${this.textNode}"`);
+  closeValue(event: "onopenobject" | "onkey" | "onvalue") {
+    if (this.hasPendingText) {
+      let node: string;
+      if (this.handler.skipDecode) {
+        node = "";
+        this.pendingBuf = null;
+      } else if (this.pendingBuf !== null) {
+        node = `"${this.pendingBuf.toString(
+          "utf8",
+          this.pendingStart,
+          this.pendingEnd
+        )}"`;
+        this.pendingBuf = null;
+      } else {
+        node = `"${this.textNode || ""}"`;
+      }
       this.textNode = undefined;
+      this.hasPendingText = false;
+      if (event === "onopenobject") {
+        this.handler.onopenobject(node);
+      } else if (event === "onkey") {
+        this.handler.onkey(node);
+      } else {
+        this.handler.onvalue(node);
+      }
     }
   }
 
   closeNumber() {
     if (this.numberNode) {
-      this.handler.onvalue("" + this.numberNode);
+      this.handler.onvalue(this.handler.skipDecode ? "" : "" + this.numberNode);
       this.numberNode = "";
     }
   }
 
-  error(er) {
+  error(er: any) {
     this.closeValue("onvalue");
     er +=
       "\nLine: " + this.line + "\nColumn: " + this.column + "\nChar: " + this.c;
@@ -444,7 +1252,6 @@ class CParser {
   }
 }
 
-// export const MAX_BUFFER_LENGTH = 10 * 1024 * 1024;
 const EVENTS = [
   "value",
   "string",
@@ -465,17 +1272,15 @@ const streamWraps = EVENTS.filter(function (ev) {
 export class CStream extends Writable {
   _parser: CParser;
   readable = true;
-  handler: MasterHandler;
-  private decoder = new StringDecoder("utf8");
+  handler: SaxHandler;
 
-  constructor(handler: MasterHandler, opt?) {
+  constructor(handler: SaxHandler, opt?: any) {
     super(opt);
     this.handler = handler;
     this._parser = new CParser(handler, opt);
 
-    this._parser.onerror = (er) => {
+    this._parser.onerror = (er: any) => {
       this.handler.onerror(er);
-      this._parser.error = null;
 
       streamWraps.forEach(function (ev) {
         Object.defineProperty(this, "on" + ev, {
@@ -497,26 +1302,45 @@ export class CStream extends Writable {
     };
   }
 
-  write(data): boolean {
-    const str = typeof data === "string" ? data : this.decoder.write(data);
-    if (str.length > 0) {
-      this._parser.write(str);
+  write(data: any): boolean {
+    if (this._parser.closed) {
+      return false;
+    }
+    if (Buffer.isBuffer(data)) {
+      if (data.length > 0) {
+        this._parser.writeBuffer(data);
+      }
+    } else if (typeof data === "string") {
+      if (data.length > 0) {
+        this._parser.write(data);
+      }
+    } else if (data != null) {
+      const buf = Buffer.from(data);
+      if (buf.length > 0) {
+        this._parser.writeBuffer(buf);
+      }
     }
     return true;
   }
 
-  end(chunk?) {
-    if (chunk) {
-      const str = typeof chunk === "string" ? chunk : this.decoder.write(chunk);
-      if (str.length > 0) this._parser.write(str);
+  end(chunk?: any) {
+    if (this._parser.closed) {
+      return;
     }
-    const remaining = this.decoder.end();
-    if (remaining.length > 0) this._parser.write(remaining);
+    if (chunk) {
+      this.write(chunk);
+    }
+    if (this._parser.closed) {
+      return;
+    }
     this._parser.end();
     this.endParser();
   }
 
   endParser() {
+    if (this._parser.closed) {
+      return;
+    }
     if (this._parser.state !== S.VALUE || this._parser.depth !== 0) {
       this._parser.error("Unexpected end");
     }
@@ -524,11 +1348,12 @@ export class CStream extends Writable {
     this._parser.c = "";
     this._parser.closed = true;
     this.handler.onend();
-    // this._parser.onend();
   }
 
   destroy() {
+    this._parser.closed = true;
     this._parser.clearBuffers();
     this.handler.onclose();
+    return this;
   }
 }
