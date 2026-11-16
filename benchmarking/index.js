@@ -10,11 +10,13 @@ var suite = new Benchmark.Suite;
 
 // JsonPath streaming libs
 var oboe = require('./oboe-node.js');
+var JSONParser = require('@streamparser/json').JSONParser;
 var Piffero = require('../dist/index.js').Piffero;
 
 // config
 var JSON_FILE = '../spec/jsonFiles/large-file.json';
 var JSON_PATH = '[11350].payload.issue.user.received_events_url';
+var STREAMPARSER_PATH = ('$' + JSON_PATH).replace(/\[(\d+)\]/g, '.$1').replace(/^\.\./, '.');
 // var JSON_PATH = '[5000].payload';
 // var JSON_PATH = '[1].payload';
 
@@ -42,6 +44,26 @@ suite.add('Piffero (stream)',{
         oboe(fs.createReadStream(JSON_FILE)).node('!'+ JSON_PATH, function (result) {
             this.abort();
             deferred.resolve();
+        });
+    }
+}).add('@streamparser/json', {
+    defer: true,
+    fn: function (deferred) {
+        var settled = false;
+        var stream = fs.createReadStream(JSON_FILE);
+        var parser = new JSONParser({ paths: [STREAMPARSER_PATH], keepStack: false });
+        parser.onValue = function () {
+            if (!settled) {
+                settled = true;
+                stream.destroy();
+                deferred.resolve();
+            }
+        };
+        stream.on('data', function (chunk) {
+            if (!settled) parser.write(chunk);
+        });
+        stream.on('end', function () {
+            if (!settled && !parser.isEnded) parser.end();
         });
     }
 })
