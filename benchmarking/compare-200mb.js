@@ -22,59 +22,17 @@ const { JSONParser } = require("@streamparser/json");
 const { JSONPath } = require("jsonpath-plus");
 const { Piffero } = require("../dist/index.js");
 
-const SRC_FILE = path.join(__dirname, "../spec/jsonFiles/large-file.json");
-const OUT_FILE = path.join(os.tmpdir(), "piffero-large-200mb.json");
-const TARGET_BYTES = 200 * 1024 * 1024; // 200 MiB (~209.72 MB)
+const { ensure200MbDataset } = require("./dataset-200mb.js");
+
+const DATASET = ensure200MbDataset();
+const OUT_FILE = DATASET.filePath;
 
 function ensure200MbFile() {
-  const srcRaw = fs.readFileSync(SRC_FILE, "utf8").trim();
-  const srcData = JSON.parse(srcRaw);
-  const srcLen = srcData.length;
-  const lastIssueIdx = 4 * srcLen + 11350;
-
-  if (fs.existsSync(OUT_FILE) && fs.statSync(OUT_FILE).size >= TARGET_BYTES) {
-    const size = fs.statSync(OUT_FILE).size;
-    // Estimate/derive exact count used when created by this generator
-    const existing = JSON.parse(fs.readFileSync(OUT_FILE, "utf8"));
-    return {
-      bytesWritten: size,
-      totalElements: existing.length,
-      lastIssueIdx,
-    };
-  }
-
-  const inner = srcRaw.slice(1, -1).trim();
-  const fd = fs.openSync(OUT_FILE, "w");
-  fs.writeSync(fd, "[");
-  let bytesWritten = 1;
-  let totalElements = 0;
-  let firstChunk = true;
-
-  while (bytesWritten + inner.length + 2 <= TARGET_BYTES) {
-    if (!firstChunk) {
-      fs.writeSync(fd, ",");
-      bytesWritten += 1;
-    }
-    fs.writeSync(fd, inner);
-    bytesWritten += inner.length;
-    totalElements += srcLen;
-    firstChunk = false;
-  }
-
-  let idx = 0;
-  while (bytesWritten < TARGET_BYTES) {
-    const serialized = JSON.stringify(srcData[idx % srcLen]);
-    fs.writeSync(fd, "," + serialized);
-    bytesWritten += 1 + serialized.length;
-    totalElements += 1;
-    idx++;
-  }
-
-  fs.writeSync(fd, "]");
-  bytesWritten += 1;
-  fs.closeSync(fd);
-
-  return { bytesWritten, totalElements, lastIssueIdx };
+  return {
+    bytesWritten: DATASET.bytesWritten,
+    totalElements: DATASET.totalElements,
+    lastIssueIdx: DATASET.endIdx,
+  };
 }
 
 function runPifferoStream(jsonPath) {

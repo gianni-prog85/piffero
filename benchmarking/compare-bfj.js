@@ -1,15 +1,16 @@
 /**
- * Piffero vs bfj benchmark suite on 38MB spec/jsonFiles/large-file.json
+ * Piffero vs bfj benchmark suite on 200 MiB JSON dataset
  * RUN: node benchmarking/compare-bfj.js
  */
 const fs = require("fs");
-const path = require("path");
 const { performance } = require("perf_hooks");
 
 const bfj = require("bfj");
 const { Piffero } = require("../dist/index.js");
+const { ensure200MbDataset } = require("./dataset-200mb.js");
 
-const JSON_FILE = path.join(__dirname, "../spec/jsonFiles/large-file.json");
+const DATASET = ensure200MbDataset();
+const JSON_FILE = DATASET.filePath;
 
 function runPifferoStream(jsonPath) {
   return new Promise((resolve, reject) => {
@@ -102,6 +103,11 @@ async function bench(label, fn, runs, skipWarmup = false) {
 }
 
 async function main() {
+  console.log(
+    `Dataset ${JSON_FILE}: ${(DATASET.bytesWritten / (1024 * 1024)).toFixed(2)} MiB (${DATASET.totalElements} elements)`
+  );
+  const midIdx = DATASET.midIdx;
+
   const cases = [
     {
       name: "1. Early file ([1].payload vs bfj predicate)",
@@ -110,22 +116,22 @@ async function main() {
       bfjSelector: (k, _v, d) => d === 2 && k === "payload",
       bfjOptions: { minDepth: 1 },
       bfjStopAfter: 2,
-      bfjRuns: 5,
+      bfjRuns: 3,
     },
     {
-      name: "2. Mid file ([5000].payload vs bfj predicate)",
-      piffero: "$.[5000].payload",
-      pifferoRuns: 3,
+      name: `2. Mid file ([${midIdx}].payload vs bfj predicate)`,
+      piffero: `$.[${midIdx}].payload`,
+      pifferoRuns: 2,
       bfjSelector: (k, _v, d) => d === 2 && k === "payload",
       bfjOptions: { minDepth: 1 },
-      bfjStopAfter: 5001,
+      bfjStopAfter: midIdx + 1,
       bfjRuns: 1,
       bfjSkipWarmup: true,
     },
     {
       name: "3. Root array elements ($[*] vs bfj depth-1 predicate)",
       piffero: "$[*]",
-      pifferoRuns: 3,
+      pifferoRuns: 2,
       bfjSelector: (_k, _v, d) => d === 1,
       bfjOptions: {},
       bfjStopAfter: 0,
@@ -135,7 +141,7 @@ async function main() {
     {
       name: "4. Recursive key ($..login vs bfj key selector 'login')",
       piffero: "$..login",
-      pifferoRuns: 3,
+      pifferoRuns: 2,
       bfjSelector: "login",
       bfjOptions: {},
       bfjStopAfter: 0,
@@ -145,7 +151,7 @@ async function main() {
     {
       name: "5. Existence filter ($[?(@.payload.issue)].payload.issue.number)",
       piffero: "$[?(@.payload.issue)].payload.issue.number",
-      pifferoRuns: 3,
+      pifferoRuns: 2,
       bfjSelector: null,
     },
   ];

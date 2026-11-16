@@ -1,11 +1,10 @@
 /**
- * Benchmark comparison on 38MB spec/jsonFiles/large-file.json:
+ * Benchmark comparison on 200 MiB GitHub events dataset:
  * Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams
  *
  * RUN: node benchmarking/compare-streaming.js
  */
 const fs = require("fs");
-const path = require("path");
 const { Readable } = require("stream");
 const { performance } = require("perf_hooks");
 
@@ -17,8 +16,10 @@ const { streamArray } = require("stream-json/streamers/stream-array.js");
 const { streamValues } = require("stream-json/streamers/stream-values.js");
 const { JSONParseStream } = require("json-web-streams");
 const { Piffero } = require("../dist/index.js");
+const { ensure200MbDataset } = require("./dataset-200mb.js");
 
-const JSON_FILE = path.join(__dirname, "../spec/jsonFiles/large-file.json");
+const DATASET = ensure200MbDataset();
+const JSON_FILE = DATASET.filePath;
 
 function runPifferoStream(jsonPath) {
   return new Promise((resolve, reject) => {
@@ -167,6 +168,11 @@ function na(label) {
 }
 
 async function main() {
+  console.log(
+    `Dataset ${JSON_FILE}: ${(DATASET.bytesWritten / (1024 * 1024)).toFixed(2)} MiB (${DATASET.totalElements} elements)`
+  );
+  const midIdx = DATASET.midIdx;
+
   const cases = [
     {
       name: "1. Early file ([1].payload)",
@@ -177,12 +183,12 @@ async function main() {
       runs: 5,
     },
     {
-      name: "2. Mid file ([5000].payload)",
-      piffero: "$.[5000].payload",
-      sapient: { path: "$[5000].payload", earlyStop: true },
-      sj: { filter: "5000.payload", useArray: false, once: true },
+      name: `2. Mid file ([${midIdx}].payload)`,
+      piffero: `$.[${midIdx}].payload`,
+      sapient: { path: `$[${midIdx}].payload`, earlyStop: true },
+      sj: { filter: `${midIdx}.payload`, useArray: false, once: true },
       jws: null,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "3. Root array elements ($[*])",
@@ -190,7 +196,7 @@ async function main() {
       sapient: { path: "$[*]", earlyStop: false },
       sj: { filter: null, useArray: true, once: false },
       jws: "$[*]",
-      runs: 3,
+      runs: 2,
     },
     {
       name: "4. Wildcard shallow ($[*].actor.login)",
@@ -198,7 +204,7 @@ async function main() {
       sapient: { path: "$[*].actor.login", earlyStop: false },
       sj: { filter: /^\d+\.actor\.login$/, useArray: false, once: false },
       jws: "$[*].actor.login",
-      runs: 3,
+      runs: 2,
     },
     {
       name: "5. Nested wildcard ($[*].payload.commits[*].author.email)",
@@ -210,7 +216,7 @@ async function main() {
         once: false,
       },
       jws: "$[*].payload.commits[*].author.email",
-      runs: 3,
+      runs: 2,
     },
     {
       name: "6. Recursive descent ($..user.login)",
@@ -218,7 +224,7 @@ async function main() {
       sapient: { path: "$..user.login", earlyStop: false },
       sj: { filter: /(?:^|\.)user\.login$/, useArray: false, once: false },
       jws: null,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "7. Existence filter ($[?(@.payload.issue)].payload.issue.number)",
@@ -226,7 +232,7 @@ async function main() {
       sapient: null,
       sj: null,
       jws: null,
-      runs: 3,
+      runs: 2,
     },
   ];
 

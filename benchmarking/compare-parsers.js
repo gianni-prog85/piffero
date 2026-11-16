@@ -1,17 +1,18 @@
 /**
- * Extended Piffero vs Oboe vs @streamparser/json vs jsonpath-plus benchmark suite on 38MB spec/jsonFiles/large-file.json
+ * Extended Piffero vs Oboe vs @streamparser/json vs jsonpath-plus benchmark suite on 200 MiB JSON dataset
  * RUN: node benchmarking/compare-parsers.js
  */
 const fs = require("fs");
-const path = require("path");
 const { performance } = require("perf_hooks");
 
 const oboe = require("./oboe-node.js");
 const { JSONParser } = require("@streamparser/json");
 const { JSONPath } = require("jsonpath-plus");
 const { Piffero } = require("../dist/index.js");
+const { ensure200MbDataset } = require("./dataset-200mb.js");
 
-const JSON_FILE = path.join(__dirname, "../spec/jsonFiles/large-file.json");
+const DATASET = ensure200MbDataset();
+const JSON_FILE = DATASET.filePath;
 
 function runPifferoStream(jsonPath) {
   return new Promise((resolve, reject) => {
@@ -142,6 +143,12 @@ async function bench(label, fn, runs) {
 }
 
 async function main() {
+  console.log(
+    `Dataset ${JSON_FILE}: ${(DATASET.bytesWritten / (1024 * 1024)).toFixed(2)} MiB (${DATASET.totalElements} elements)`
+  );
+  const midIdx = DATASET.midIdx;
+  const endIdx = DATASET.endIdx;
+
   const cases = [
     {
       name: "1. Early file ([1].payload)",
@@ -150,25 +157,25 @@ async function main() {
       streamparser: ["$.1.payload"],
       jsonpathPlus: "$[1].payload",
       abortOnFirst: true,
-      runs: 10,
-    },
-    {
-      name: "2. Mid file ([5000].payload)",
-      piffero: "$.[5000].payload",
-      oboe: "![5000].payload",
-      streamparser: ["$.5000.payload"],
-      jsonpathPlus: "$[5000].payload",
-      abortOnFirst: true,
       runs: 5,
     },
     {
-      name: "3. End file ([11350].payload.issue.user.received_events_url)",
-      piffero: "$.[11350].payload.issue.user.received_events_url",
-      oboe: "![11350].payload.issue.user.received_events_url",
-      streamparser: ["$.11350.payload.issue.user.received_events_url"],
-      jsonpathPlus: "$[11350].payload.issue.user.received_events_url",
+      name: `2. Mid file ([${midIdx}].payload)`,
+      piffero: `$.[${midIdx}].payload`,
+      oboe: `![${midIdx}].payload`,
+      streamparser: [`$.${midIdx}.payload`],
+      jsonpathPlus: `$[${midIdx}].payload`,
       abortOnFirst: true,
-      runs: 5,
+      runs: 2,
+    },
+    {
+      name: `3. End file ([${endIdx}].payload.issue.user.received_events_url)`,
+      piffero: `$.[${endIdx}].payload.issue.user.received_events_url`,
+      oboe: `![${endIdx}].payload.issue.user.received_events_url`,
+      streamparser: [`$.${endIdx}.payload.issue.user.received_events_url`],
+      jsonpathPlus: `$[${endIdx}].payload.issue.user.received_events_url`,
+      abortOnFirst: true,
+      runs: 2,
     },
     {
       name: "4. Root array elements ($[*])",
@@ -177,7 +184,7 @@ async function main() {
       streamparser: ["$.*"],
       jsonpathPlus: "$[*]",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "5. Wildcard shallow ($[*].actor.login)",
@@ -186,7 +193,7 @@ async function main() {
       streamparser: ["$.*.actor.login"],
       jsonpathPlus: "$[*].actor.login",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "6. Nested wildcard ($[*].payload.commits[*].author.email)",
@@ -195,7 +202,7 @@ async function main() {
       streamparser: ["$.*.payload.commits.*.author.email"],
       jsonpathPlus: "$[*].payload.commits[*].author.email",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "7. Recursive descent + child ($..user.login)",
@@ -204,7 +211,7 @@ async function main() {
       streamparser: null,
       jsonpathPlus: "$..user.login",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "8. Recursive descent + wildcard ($..commits[*].sha)",
@@ -213,7 +220,7 @@ async function main() {
       streamparser: null,
       jsonpathPlus: "$..commits[*].sha",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
     {
       name: "9. Existence filter vs Oboe duck-typing ($[?(@.payload.issue)].payload.issue.number)",
@@ -222,7 +229,7 @@ async function main() {
       streamparser: null,
       jsonpathPlus: "$[?(@.payload.issue)].payload.issue.number",
       abortOnFirst: false,
-      runs: 3,
+      runs: 2,
     },
   ];
 

@@ -1,6 +1,6 @@
 # Piffero vs Modern Streaming Parsers (`@sapientpro/json-stream`, `stream-json`, `json-web-streams`)
 
-Full benchmark and parity comparison executed on the 38 MB GitHub events dataset ([large-file.json](../../spec/jsonFiles/large-file.json)) using [`compare-streaming.js`](../../benchmarking/compare-streaming.js).
+Full benchmark and parity comparison executed on the 200 MiB GitHub events dataset (`200.01 MiB` / `209.72 MB`, `62,683` elements generated in `os.tmpdir()` from [large-file.json](../../spec/jsonFiles/large-file.json)) using [`compare-streaming.js`](../../benchmarking/compare-streaming.js).
 
 ```bash
 npm run benchmark:streaming
@@ -15,7 +15,7 @@ npm run benchmark:streaming
 | **`stream-json`** | `3.9.0` | Token pipeline (`parser` → `pick` → `streamValues` / `streamArray`) | String / RegExp / function path filters (no native JSONPath parser) |
 | **`json-web-streams`** | `1.2.0` | Web `TransformStream` (`TextDecoderStream` → `JSONParseStream`) | Strict subset (`.key`, `['key']`, `.*`, `[*]`); rejects `[i]`, `..`, `?()`, slices, unions |
 
-## Benchmark Results (38 MB JSON)
+## Benchmark Results (200 MiB JSON)
 
 > Notes:
 > - Piffero outputs serialized JSON (`[...]`), and the harness runs `JSON.parse()` to verify exact match counts; the other three parsers emit assembled JS objects directly.
@@ -25,75 +25,75 @@ npm run benchmark:streaming
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **Piffero (string)** | **0.63** | **0.62** | **1582.57** | 1 |
-| `@sapientpro/json-stream` | 0.72 | 0.65 | 1394.52 | 1 |
-| Piffero (stream) | 0.87 | 0.62 | 1151.11 | 1 |
-| `stream-json` | 7.81 | 7.30 | 128.09 | 1 |
+| **Piffero (string)** | **0.52** | **0.44** | **1922.83** | 1 |
+| `@sapientpro/json-stream` | 1.02 | 1.00 | 977.96 | 1 |
+| Piffero (stream) | 1.82 | 1.68 | 548.29 | 1 |
+| `stream-json` | 5.18 | 5.41 | 193.05 | 1 |
 | `json-web-streams` | N/A | N/A | N/A | N/A (numeric index unsupported) |
 
-### 2. Mid file (`$.[5000].payload`, 1 match)
+### 2. Mid file (`$.[31341].payload`, 1 match)
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **`@sapientpro/json-stream`** | **96.50** | **95.98** | **10.36** | 1 |
-| Piffero (string) | 106.31 | 107.53 | 9.41 | 1 |
-| Piffero (stream) | 128.22 | 105.63 | 7.80 | 1 |
-| `stream-json` | 378.09 | 373.16 | 2.64 | 1 |
+| **Piffero (string)** | **626.82** | **627.34** | **1.60** | 1 |
+| Piffero (stream) | 648.96 | 677.59 | 1.54 | 1 |
+| `@sapientpro/json-stream` | 653.92 | 667.74 | 1.53 | 1 |
+| `stream-json` | 2353.51 | 2365.95 | 0.42 | 1 |
 | `json-web-streams` | N/A | N/A | N/A | N/A (numeric index unsupported) |
 
-### 3. Root array elements (`$[*]`, 11,351 matches)
+### 3. Root array elements (`$[*]`, 62,683 matches)
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **`json-web-streams`** | **258.04** | **261.45** | **3.88** | 11,351 |
-| `@sapientpro/json-stream` | 459.77 | 465.97 | 2.18 | 11,351 |
-| Piffero (string) | 695.49 | 693.57 | 1.44 | 11,351 |
-| Piffero (stream) | 756.51 | 794.71 | 1.32 | 11,351 |
-| `stream-json` | 895.20 | 893.83 | 1.12 | 11,351 |
+| **`json-web-streams`** | **1322.19** | **1337.85** | **0.76** | 62,683 |
+| `@sapientpro/json-stream` | 2512.46 | 2556.37 | 0.40 | 62,683 |
+| Piffero (string) | 3379.41 | 3410.90 | 0.30 | 62,683 |
+| Piffero (stream) | 3720.35 | 3780.66 | 0.27 | 62,683 |
+| `stream-json` | 4780.08 | 4795.81 | 0.21 | 62,683 |
 
-### 4. Wildcard shallow (`$[*].actor.login`, 11,351 matches)
-
-| Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
-|---|---|---|---|---|
-| **Piffero (string)** | **258.44** | **258.64** | **3.87** | 11,351 |
-| **Piffero (stream)** | **261.39** | **258.56** | **3.83** | 11,351 |
-| `@sapientpro/json-stream` | 279.07 | 276.21 | 3.58 | 11,351 |
-| `json-web-streams` | 290.40 | 288.50 | 3.44 | 11,351 |
-| `stream-json` | 1000.93 | 1003.73 | 1.00 | 11,351 |
-
-### 5. Nested wildcard (`$[*].payload.commits[*].author.email`, 10,109 matches)
+### 4. Wildcard shallow (`$[*].actor.login`, 62,683 matches)
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **Piffero (stream)** | **292.13** | **293.79** | **3.42** | 10,109 |
-| **Piffero (string)** | **292.60** | **292.60** | **3.42** | 10,109 |
-| `json-web-streams` | 304.73 | 304.20 | 3.28 | 10,109 |
-| `@sapientpro/json-stream` | 334.12 | 332.98 | 2.99 | 10,109 |
-| `stream-json` | 1011.43 | 1010.01 | 0.99 | 10,109 |
+| **Piffero (stream)** | **1331.90** | 1341.15 | **0.75** | 62,683 |
+| **Piffero (string)** | **1332.79** | **1333.66** | **0.75** | 62,683 |
+| `@sapientpro/json-stream` | 1490.44 | 1495.72 | 0.67 | 62,683 |
+| `json-web-streams` | 1529.75 | 1536.48 | 0.65 | 62,683 |
+| `stream-json` | 5504.25 | 5506.90 | 0.18 | 62,683 |
 
-### 6. Recursive descent (`$..user.login`, 4,272 matches)
+### 5. Nested wildcard (`$[*].payload.commits[*].author.email`, 55,729 matches)
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **Piffero (string)** | **489.70** | **490.46** | **2.04** | 4,272 |
-| **Piffero (stream)** | **505.31** | **507.09** | **1.98** | 4,272 |
-| `@sapientpro/json-stream` | 554.18 | 552.08 | 1.80 | 4,272 |
-| `stream-json` | 980.58 | 975.86 | 1.02 | 4,272 |
+| **Piffero (string)** | **1508.18** | 1520.67 | **0.66** | 55,729 |
+| **Piffero (stream)** | **1513.78** | **1518.82** | **0.66** | 55,729 |
+| `@sapientpro/json-stream` | 1766.77 | 1769.93 | 0.57 | 55,729 |
+| `json-web-streams` | 1778.87 | 1787.14 | 0.56 | 55,729 |
+| `stream-json` | 5397.23 | 5406.45 | 0.19 | 55,729 |
+
+### 6. Recursive descent (`$..user.login`, 23,715 matches)
+
+| Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
+|---|---|---|---|---|
+| **Piffero (string)** | **2452.23** | **2464.29** | **0.41** | 23,715 |
+| **Piffero (stream)** | **2471.85** | **2477.55** | **0.40** | 23,715 |
+| `@sapientpro/json-stream` | 3009.94 | 3027.66 | 0.33 | 23,715 |
+| `stream-json` | 5362.21 | 5397.38 | 0.19 | 23,715 |
 | `json-web-streams` | N/A | N/A | N/A | N/A (`..` unsupported) |
 
-### 7. Existence filter (`$[?(@.payload.issue)].payload.issue.number`, 1,389 matches)
+### 7. Existence filter (`$[?(@.payload.issue)].payload.issue.number`, 7,725 matches)
 
 | Parser | Avg (ms) | Median (ms) | Ops/sec | Matches |
 |---|---|---|---|---|
-| **Piffero (string)** | **294.31** | **294.06** | **3.40** | 1,389 |
-| Piffero (stream) | 301.43 | 302.30 | 3.32 | 1,389 |
+| **Piffero (string)** | **1604.26** | **1620.74** | **0.62** | 7,725 |
+| Piffero (stream) | 1630.32 | 1632.37 | 0.61 | 7,725 |
 | `@sapientpro/json-stream` | N/A | N/A | N/A | N/A (filters unsupported) |
 | `stream-json` | N/A | N/A | N/A | N/A (no JSONPath filter engine) |
 | `json-web-streams` | N/A | N/A | N/A | N/A (filters unsupported) |
 
 ## Key Takeaways
 
-- **Fastest in 5 of 7 scenarios**: Piffero wins on early-exit (`0.63 ms`), shallow wildcards (`258.44 ms`), nested wildcards (`292.13 ms`), recursive descent (`489.70 ms`), and existence filters (`294.31 ms`)—even while outputting serialized JSON and paying a `JSON.parse()` verification step in the harness.
-- **Vs `stream-json`**: Piffero is **~1.2x–12.4x faster** across every single scenario (`0.63 ms` vs `7.81 ms` on early-exit, `106.31 ms` vs `378.09 ms` on mid-file, `258.44 ms` vs `1000.93 ms` on shallow wildcards, `292.13 ms` vs `1011.43 ms` on nested wildcards, and `489.70 ms` vs `980.58 ms` on recursive descent).
-- **Vs `@sapientpro/json-stream` & `json-web-streams`**: Piffero now outpaces both on shallow wildcards (`258.44 ms` vs `279.07 ms` / `290.40 ms`), nested wildcards (`292.13 ms` vs `334.12 ms` / `304.73 ms`), and recursive descent (`489.70 ms` vs `554.18 ms`), while nearly matching `@sapientpro/json-stream` on mid-file lookups (`106.31 ms` vs `96.50 ms`). Additionally, **only Piffero** supports JSONPath filters `?()`, array slices, unions, negative indexes, automatic early termination, and direct JSON pass-through streaming (`[...]`).
+- **Fastest in 6 of 7 scenarios on 200 MiB**: Piffero wins on early-exit (`0.52 ms`), mid-file (`626.82 ms`), shallow wildcards (`1331.90 ms`), nested wildcards (`1508.18 ms`), recursive descent (`2452.23 ms`), and existence filters (`1604.26 ms`)—even while outputting serialized JSON and paying a `JSON.parse()` verification step in the harness.
+- **Vs `stream-json`**: Piffero is **~1.4x–10.0x faster** across every single scenario (`0.52 ms` vs `5.18 ms` on early-exit, `626.82 ms` vs `2353.51 ms` on mid-file, `1331.90 ms` vs `5504.25 ms` on shallow wildcards, `1508.18 ms` vs `5397.23 ms` on nested wildcards, and `2452.23 ms` vs `5362.21 ms` on recursive descent).
+- **Vs `@sapientpro/json-stream` & `json-web-streams`**: Piffero outpaces both on early-exit (`0.52 ms` vs `1.02 ms`), mid-file (`626.82 ms` vs `653.92 ms`), shallow wildcards (`1331.90 ms` vs `1490.44 ms` / `1529.75 ms`), nested wildcards (`1508.18 ms` vs `1766.77 ms` / `1778.87 ms`), and recursive descent (`2452.23 ms` vs `3009.94 ms`). Additionally, **only Piffero** supports JSONPath filters `?()`, array slices, unions, negative indexes, automatic early termination, and direct JSON pass-through streaming (`[...]`).
 - Verified in Jasmine parity suite: [`streamingParsersParitySpec.ts`](../../spec/piffero/streamingParsersParitySpec.ts).

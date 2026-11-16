@@ -14,12 +14,13 @@ var JSONParser = require('@streamparser/json').JSONParser;
 var JSONPath = require('jsonpath-plus').JSONPath;
 var Piffero = require('../dist/index.js').Piffero;
 
+var ensure200MbDataset = require('./dataset-200mb.js').ensure200MbDataset;
+
 // config
-var JSON_FILE = '../spec/jsonFiles/large-file.json';
-var JSON_PATH = '[11350].payload.issue.user.received_events_url';
+var DATASET = ensure200MbDataset();
+var JSON_FILE = DATASET.filePath;
+var JSON_PATH = '[' + DATASET.endIdx + '].payload.issue.user.received_events_url';
 var STREAMPARSER_PATH = ('$' + JSON_PATH).replace(/\[(\d+)\]/g, '.$1').replace(/^\.\./, '.');
-// var JSON_PATH = '[5000].payload';
-// var JSON_PATH = '[1].payload';
 
 // run test ...
 suite.add('Piffero (stream)',{

@@ -15,11 +15,11 @@ Piffero can process JSON files larger than available RAM and return the matched 
 
 - **Zero runtime dependencies**: Lightweight and self-contained (`dependencies: {}`), with bundled TypeScript declarations (`.d.ts`).
 - **Larger-than-RAM streaming**: Parses Node.js `Readable` streams token-by-token without loading the full JSON document or allocating JavaScript objects for unmatched branches.
-- **Automatic early stream termination**: Destroys the upstream stream immediately once deterministic queries (e.g., `$.[1].payload`, `$.items[0:3]`) complete—delivering up to **~19x–23x** faster early-file extraction than Oboe and `@streamparser/json`.
+- **Automatic early stream termination**: Destroys the upstream stream immediately once deterministic queries (e.g., `$.[1].payload`, `$.items[0:3]`) complete—delivering up to **~12x–24x** faster early-file extraction than Oboe and up to **~3,376x–7,358x** faster than in-memory `jsonpath-plus`.
 - **Backpressure-aware JSON pass-through**: `Piffero.findByPath()` emits a chunked, backpressure-aware Node.js `Readable` stream containing a valid JSON array (`[...]`), ready to `.pipe(res)` directly over HTTP or into files without extra `JSON.stringify` overhead.
 - **Complete JSONPath syntax**: Supports recursive descent (`..`), wildcards (`*`), array slices (`[start:end:step]`, negative indexes), unions (`[,]`), compound filter expressions (`?()` with `&&`, `||`, `!`, comparisons, existence checks), and script expressions (`(@.length-1)`)—capabilities missing from basic path-prefix parsers like `@streamparser/json`.
 - **Flexible APIs**: Use `findByPath` (Stream), `findAsString` (callback), or `findAsPromise` (`async`/`await`) with clear separation between invalid JSONPath errors (`PifferoJsonPathError`) and malformed JSON stream errors (`PifferoError`).
-- **Proven speed**: Outperforms `@sapientpro/json-stream`, `json-web-streams`, `Oboe`, `@streamparser/json`, `stream-json`, `bfj`, and in-memory `jsonpath-plus` across early-exit, point lookups, selective wildcards, and recursive descent over 38 MB JSON payloads (see [PERFORMANCE](#performance)).
+- **Proven speed**: Outperforms `@sapientpro/json-stream`, `json-web-streams`, `Oboe`, `@streamparser/json`, `stream-json`, `bfj`, and in-memory `jsonpath-plus` across early-exit, point lookups, selective wildcards, and recursive descent over 200 MiB JSON payloads (see [PERFORMANCE](#performance)).
 
 # Description
 
@@ -206,29 +206,32 @@ app.listen(3000, () => {
 
 ## Development & Benchmarking
 
+All benchmark suites automatically generate and cache a **200 MiB** (`200.01 MiB` / `209.72 MB`, `62,683` elements) JSON dataset in `os.tmpdir()` from [`spec/jsonFiles/large-file.json`](./spec/jsonFiles/large-file.json) on first run:
+
 ```bash
 npm run build                    # Compile TypeScript to ./dist
 npm test                         # Run Jasmine test suite
-npm run benchmark                # Benchmark.Suite (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
-npm run benchmark:compare        # 9-scenario comparison (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
-npm run benchmark:streaming      # 7-scenario comparison (Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams)
-npm run benchmark:bfj            # 5-scenario comparison (Piffero vs bfj)
+npm run benchmark                # Benchmark.Suite on 200 MiB JSON (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
+npm run benchmark:compare        # 9-scenario 200 MiB comparison (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
+npm run benchmark:streaming      # 7-scenario 200 MiB comparison (Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams)
+npm run benchmark:bfj            # 5-scenario 200 MiB comparison (Piffero vs bfj)
 npm run benchmark:200mb          # 8-scenario 200 MiB scale comparison across all 7 libraries
 ```
 
 ## PERFORMANCE
 
-Benchmarks run on the 38 MB GitHub events dataset (`spec/jsonFiles/large-file.json`)—plus a 200 MiB scaled dataset (`npm run benchmark:200mb`)—against 7 libraries (`Oboe`, `@streamparser/json`, `@sapientpro/json-stream`, `stream-json`, `json-web-streams`, `bfj`, and in-memory `jsonpath-plus`).
+Benchmarks run on the **200 MiB** GitHub events dataset (`200.01 MiB` / `209.72 MB`, `62,683` records generated from `spec/jsonFiles/large-file.json`) against 7 libraries (`@sapientpro/json-stream`, `json-web-streams`, `stream-json`, `@streamparser/json`, `Oboe`, `bfj`, and in-memory `jsonpath-plus`).
 
-### Summary
+### Summary (200 MiB JSON)
 
 | Workload | Best Piffero | Key Comparison |
 |---|---|---|
-| **Early-exit index (`$.[1].payload`)** | **0.63 ms** (`string`) | Fastest overall: beats `@sapientpro/json-stream` (`0.72 ms`), **~4x** faster than `bfj` (`2.67 ms`), **~12x** faster than `stream-json` (`7.81 ms`), **~19x–23x** faster than `Oboe`/`@streamparser/json` (`15.45` / `18.25 ms`), **~868x** faster than in-memory `jsonpath-plus` (`686.08 ms`); `json-web-streams` unsupported |
-| **Mid-file lookup (`$.[5000].payload`)** | **94.12–95.50 ms** (`string`) | **~2.5x–2.9x** faster than `jsonpath-plus` (`240.05 ms`) & `@streamparser/json` (`276.18 ms`), **~3.6x–5.8x** faster than `stream-json`/`Oboe`, **~46x** faster than `bfj` (`4363.20 ms`), virtually tied with `@sapientpro/json-stream` (`96.50 ms`) |
-| **Selective wildcards (`$[*].actor.login`, `$[*].payload.commits[*].author.email`)** | **258.44 ms** / **288.80 ms** | Fastest streaming parser overall: ahead of `@sapientpro/json-stream` (`279.07` / `334.12 ms`), `json-web-streams` (`290.40` / `304.73 ms`), `@streamparser/json` (`624.90` / `646.10 ms`), `Oboe` (`795.80` / `792.39 ms`), and `stream-json` (`1000.93` / `1011.43 ms`) |
-| **Recursive descent (`$..user.login`)** | **476.67–489.70 ms** (`string`) | Fastest streaming parser overall: faster than `@sapientpro/json-stream` (`554.18 ms`), `Oboe` (`800.98 ms`), `stream-json` (`980.58 ms`), and **~20x** faster than `bfj` (`$..login`); `@streamparser/json` and `json-web-streams` unsupported |
-| **Filters (`?()`), slices (`[start:end]`), unions, negative indexes** | **294–310 ms** (filters) | **Only streaming library with native full JSONPath support** (**~2.5x** faster than Oboe duck-typing at `776.80 ms`, with all other streaming parsers unsupported); matches `jsonpath-plus` (`261.61 ms` in-memory) with bounded RAM |
+| **Early-exit index (`$.[1].payload`)** | **0.44–0.98 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`0.77–1.02 ms`), `@streamparser/json` (`0.93–10.24 ms`), **~7.9x** faster than `bfj` (`4.36 ms`), **~7x–10x** faster than `stream-json` (`3.05–5.18 ms`), **~12x–24x** faster than `Oboe` (`10.51–11.94 ms`), **~3,376x–7,358x** faster than in-memory `jsonpath-plus` (`3237.53–3308.25 ms`); `json-web-streams` unsupported |
+| **Mid-file lookup (`$.[31341].payload`)** | **582.10–626.82 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`624.34–653.92 ms`), **~2.6x–3.4x** faster than `jsonpath-plus` (`1568.75–2013.73 ms`), **~2.9x** faster than `@streamparser/json` (`1712.21–1751.00 ms`), **~3.8x** faster than `stream-json` (`2240.51–2353.51 ms`), **~5.2x–5.4x** faster than `Oboe` (`3095.61–3240.89 ms`), **~52.8x** faster than `bfj` (`30,760.45 ms`) |
+| **End-of-file lookup (`$.[56754]...received_events_url`)** | **1007.26–1118.06 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`1116.58 ms`), **~1.8x–2.0x** faster than `jsonpath-plus` (`1973.14–2036.98 ms`), **~2.8x–3.1x** faster than `@streamparser/json` (`3103.23–3182.61 ms`), **~3.8x–4.0x** faster than `stream-json` / `Oboe` (`3972.58–4302.49 ms`) |
+| **Selective wildcards (`$[*].actor.login`, `$[*].payload.commits[*].author.email`)** | **1320.95–1424.71 ms** / **1491.72–1603.60 ms** | Fastest streaming parser on nested wildcards (`1491.72–1603.60 ms`): ahead of `json-web-streams` (`1647.89–1778.87 ms`), `@sapientpro/json-stream` (`1766.77–1788.61 ms`), `@streamparser/json` (`3539.04–3780.32 ms`), `Oboe` (`4248.27–4580.17 ms`), and `stream-json` (`5397.23–5463.27 ms`), while beating `jsonpath-plus` (`1571.89` / `1937.37 ms`) with bounded RAM |
+| **Recursive descent (`$..user.login`, `$..login`)** | **2452.23–2702.94 ms** (`$..user.login`) | Fastest streaming parser overall: faster than `@sapientpro/json-stream` (`3009.94–3018.34 ms`), `Oboe` (`4115.83–4461.52 ms`), `stream-json` (`5362.21–5425.97 ms`), and **~22.8x** faster than `bfj` (`2591.42 ms` vs `59,125.34 ms` on `$..login`); `@streamparser/json` and `json-web-streams` unsupported |
+| **Filters (`?()`), slices (`[start:end]`), unions, negative indexes** | **1578.08–1678.32 ms** (filters) | **Only streaming library with native full JSONPath support** (**~2.6x** faster than `Oboe` duck-typing at `4148.77–4369.64 ms`, with all other streaming parsers unsupported); tracks `jsonpath-plus` (`1406.57–1594.54 ms` in-memory) with bounded RAM |
 
 ### Full Reports & Detailed Matrices
 
