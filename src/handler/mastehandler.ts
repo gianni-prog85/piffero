@@ -1,4 +1,4 @@
-import { CStream } from "./../libs/clarinet/cstream";
+import { CStream, SaxHandler } from "./../libs/clarinet/cstream";
 import { Readable, Stream } from "stream";
 import {
   StreamingPathEngine,
@@ -23,6 +23,7 @@ export const PATH_DOESNT_MATCH = "Path doesn't match";
 export class PifferoError extends Error {}
 
 const STREAM_CHUNK_THRESHOLD = 4096;
+const STRING_CHUNK_THRESHOLD = 16384;
 
 type PifferoEvent =
   | typeof OPEN_OBJECT
@@ -141,11 +142,12 @@ export class PifferoStatus {
   }
 }
 
-export class MasterHandler {
+export class MasterHandler implements SaxHandler {
   handlerIndex = 0;
   stepHandlers: SingleStepHandler[] = [];
   currentHandler: SingleStepHandler;
   useString: boolean;
+  skipDecode = false;
   cStream: CStream;
   callback: (result, error?) => void;
   error = null;
@@ -154,6 +156,8 @@ export class MasterHandler {
   private streamingEngine: StreamingPathEngine = null;
   private engineClosed = false;
   private engineOutputChunks: string[] = ["["];
+  private engineStringBuffer: string[] = [];
+  private engineStringBufferLen = 0;
   private engineStreamBuffer: string[] = [];
   private engineStreamBufferLen = 0;
 
@@ -178,12 +182,20 @@ export class MasterHandler {
     if (parsedPath.needsStreamingEngine && parsedPath.steps) {
       this.streamingEngine = new StreamingPathEngine(
         parsedPath.steps,
-        (chunk: string) => this.pushEngineOutput(chunk)
+        (chunk: string) => this.pushEngineOutput(chunk),
+        () => {
+          this.cStream.destroy();
+          this.stream.unpipe();
+          this.stream.destroy();
+        }
       );
+      this.streamingEngine.onend = () => this.onend();
+      this.streamingEngine.onclose = () => this.onclose();
+      this.streamingEngine.onerror = (er: any) => this.onerror(er);
       if (!useString) {
         this.output.push("[");
       }
-      this.cStream = new CStream(this);
+      this.cStream = new CStream(this.streamingEngine);
       this.stream.pipe(this.cStream);
       if (!useString) {
         return this.output;
@@ -220,6 +232,7 @@ export class MasterHandler {
     this.currentHandler = this.stepHandlers[this.handlerIndex];
 
     this.shiftParser();
+    this.updateLegacySkipDecode();
     this.cStream = new CStream(this);
     this.stream.pipe(this.cStream);
     if (!useString) {
@@ -229,7 +242,13 @@ export class MasterHandler {
 
   private pushEngineOutput(value: string) {
     if (this.useString) {
-      this.engineOutputChunks.push(value);
+      this.engineStringBuffer.push(value);
+      this.engineStringBufferLen += value.length;
+      if (this.engineStringBufferLen >= STRING_CHUNK_THRESHOLD) {
+        this.engineOutputChunks.push(this.engineStringBuffer.join(""));
+        this.engineStringBuffer = [];
+        this.engineStringBufferLen = 0;
+      }
     } else {
       this.engineStreamBuffer.push(value);
       this.engineStreamBufferLen += value.length;
@@ -247,6 +266,19 @@ export class MasterHandler {
       if (!this.output.push(chunk) && this.stream && !this.stream.isPaused()) {
         this.stream.pause();
       }
+    }
+  }
+
+  private updateLegacySkipDecode() {
+    if (this.currentHandler) {
+      const st = this.currentHandler.status;
+      this.skipDecode =
+        !st.recording &&
+        !st.path.hascondtion &&
+        !st.path.condition &&
+        st.depthCounter >= 3;
+    } else {
+      this.skipDecode = false;
     }
   }
 
@@ -289,6 +321,7 @@ export class MasterHandler {
     }
     this.currentHandler.openObject(node);
     this.shiftParser();
+    this.updateLegacySkipDecode();
   }
 
   // ------ OPEN ARRAY -----------------------------------------------------------
@@ -299,6 +332,7 @@ export class MasterHandler {
     }
     this.currentHandler.openArray();
     this.shiftParser();
+    this.updateLegacySkipDecode();
   }
 
   // --- CLOSE OBJECT  -------------------------------------------------------
@@ -308,6 +342,7 @@ export class MasterHandler {
       return;
     }
     this.currentHandler.closeObject();
+    this.updateLegacySkipDecode();
     this.checkStreams();
   }
 
@@ -318,6 +353,7 @@ export class MasterHandler {
       return;
     }
     this.currentHandler.closeArray();
+    this.updateLegacySkipDecode();
     this.checkStreams();
   }
 
@@ -329,6 +365,7 @@ export class MasterHandler {
     }
     this.currentHandler.key(node);
     this.shiftParser();
+    this.updateLegacySkipDecode();
     this.checkStreams();
   }
   // ------ END KEY  --------------------------------------------------------
@@ -340,6 +377,7 @@ export class MasterHandler {
       return;
     }
     this.currentHandler.value(node);
+    this.updateLegacySkipDecode();
     this.checkStreams();
   }
 
@@ -352,6 +390,11 @@ export class MasterHandler {
         this.output.push("]");
         this.output.push(null);
       } else {
+        if (this.engineStringBuffer.length > 0) {
+          this.engineOutputChunks.push(this.engineStringBuffer.join(""));
+          this.engineStringBuffer = [];
+          this.engineStringBufferLen = 0;
+        }
         this.engineOutputChunks.push("]");
         this.callback(this.engineOutputChunks.join(""), this.error);
       }
@@ -363,6 +406,7 @@ export class MasterHandler {
       this.output.push("]");
       this.output.push(null);
     } else {
+      this.currentHandler.flushStringBuffer();
       this.currentHandler.outputChunks.push("]");
       this.callback(this.currentHandler.outputChunks.join(""), this.error);
     }
@@ -448,6 +492,8 @@ class SingleStepHandler {
   _inputStream: Readable;
   useString = false;
   outputChunks: string[] = ["["];
+  private stringBuffer: string[] = [];
+  private stringBufferLen = 0;
   private streamBuffer: string[] = [];
   private streamBufferLen = 0;
   private postConditionPath: ParsedPath = null;
@@ -474,7 +520,13 @@ class SingleStepHandler {
     }
     if (this.isLast) {
       if (this.useString) {
-        this.emitOutput = (value: string) => this.outputChunks.push(value);
+        this.emitOutput = (value: string) => {
+          this.stringBuffer.push(value);
+          this.stringBufferLen += value.length;
+          if (this.stringBufferLen >= STRING_CHUNK_THRESHOLD) {
+            this.flushStringBuffer();
+          }
+        };
       } else {
         this.emitOutput = (value: string) => {
           this.streamBuffer.push(value);
@@ -489,6 +541,14 @@ class SingleStepHandler {
       } else {
         this.push = this.emitOutput;
       }
+    }
+  }
+
+  flushStringBuffer() {
+    if (this.stringBuffer.length > 0) {
+      this.outputChunks.push(this.stringBuffer.join(""));
+      this.stringBuffer = [];
+      this.stringBufferLen = 0;
     }
   }
 

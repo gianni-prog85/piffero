@@ -1,4 +1,5 @@
 import { ConditionEval, ExprNode } from "../conditioneval/conditioneval";
+import { SaxHandler } from "../libs/clarinet/cstream";
 
 export type JsonPathStep =
   | { kind: "child"; key: string; recursive?: boolean }
@@ -735,19 +736,17 @@ class JsonValueCollector {
 
   openObject(keyNode?: string) {
     const parent = this.stack[this.stack.length - 1];
-    if (parent && parent.type === "array" && parent.hasItem) {
-      this.emit(",");
-    }
     if (parent) {
+      if (parent.type === "array" && parent.hasItem) {
+        this.emit(keyNode !== undefined ? `,{${keyNode}:` : ",{");
+      } else {
+        this.emit(keyNode !== undefined ? `{${keyNode}:` : "{");
+      }
       parent.hasItem = true;
+    } else {
+      this.emit(keyNode !== undefined ? `{${keyNode}:` : "{");
     }
-    this.emit("{");
-    const entry: CaptureStackEntry = { type: "object", hasItem: false };
-    this.stack.push(entry);
-    if (keyNode !== undefined) {
-      this.emit(`${keyNode}:`);
-      entry.hasItem = true;
-    }
+    this.stack.push({ type: "object", hasItem: keyNode !== undefined });
   }
 
   closeObject() {
@@ -760,13 +759,16 @@ class JsonValueCollector {
 
   openArray() {
     const parent = this.stack[this.stack.length - 1];
-    if (parent && parent.type === "array" && parent.hasItem) {
-      this.emit(",");
-    }
     if (parent) {
+      if (parent.type === "array" && parent.hasItem) {
+        this.emit(",[");
+      } else {
+        this.emit("[");
+      }
       parent.hasItem = true;
+    } else {
+      this.emit("[");
     }
-    this.emit("[");
     this.stack.push({ type: "array", hasItem: false });
   }
 
@@ -781,23 +783,412 @@ class JsonValueCollector {
   key(keyNode: string) {
     const top = this.stack[this.stack.length - 1];
     if (top.hasItem) {
-      this.emit(",");
+      this.emit(`,${keyNode}:`);
+    } else {
+      top.hasItem = true;
+      this.emit(`${keyNode}:`);
     }
-    top.hasItem = true;
-    this.emit(`${keyNode}:`);
   }
 
   value(valNode: string) {
     const top = this.stack[this.stack.length - 1];
-    if (top && top.type === "array" && top.hasItem) {
-      this.emit(",");
-    }
     if (top) {
-      top.hasItem = true;
+      if (top.type === "array" && top.hasItem) {
+        this.emit(`,${valNode}`);
+      } else {
+        top.hasItem = true;
+        this.emit(valNode);
+      }
+    } else {
+      this.emit(valNode);
+      this.done = true;
     }
-    this.emit(valNode);
+  }
+}
+
+// ---------- Pruned JS Object Builder for ?() filters with post-steps ----------
+
+interface FilterProjectionNode {
+  captureFull: boolean;
+  usedAsTruthiness: boolean;
+  children: Map<string, FilterProjectionNode>;
+}
+
+function createProjectionNode(): FilterProjectionNode {
+  return {
+    captureFull: false,
+    usedAsTruthiness: false,
+    children: new Map(),
+  };
+}
+
+function getOrCreateChildProj(
+  node: FilterProjectionNode,
+  key: string
+): FilterProjectionNode {
+  let child = node.children.get(key);
+  if (!child) {
+    child = createProjectionNode();
+    node.children.set(key, child);
+  }
+  return child;
+}
+
+function markProjectionPath(
+  root: FilterProjectionNode,
+  path: string[],
+  asTruthiness: boolean
+) {
+  let cur = root;
+  for (let i = 0; i < path.length; i++) {
+    cur = getOrCreateChildProj(cur, path[i]);
+  }
+  if (asTruthiness) {
+    cur.usedAsTruthiness = true;
+  } else {
+    cur.captureFull = true;
+  }
+}
+
+function extractCurrentMemberChain(node: ExprNode): string[] | null {
+  if (node.type === "current") {
+    return [];
+  }
+  if (node.type === "member") {
+    const base = extractCurrentMemberChain(node.object);
+    if (base !== null) {
+      base.push(node.property);
+      return base;
+    }
+  } else if (
+    node.type === "index" &&
+    node.index.type === "literal" &&
+    typeof node.index.value === "string"
+  ) {
+    const base = extractCurrentMemberChain(node.object);
+    if (base !== null) {
+      base.push(node.index.value);
+      return base;
+    }
+  }
+  return null;
+}
+
+function collectExprProjection(
+  node: ExprNode,
+  root: FilterProjectionNode,
+  truthinessContext: boolean
+): boolean {
+  switch (node.type) {
+    case "literal":
+    case "identifier":
+      return true;
+    case "current":
+    case "root":
+      return false;
+    case "member": {
+      const chain = extractCurrentMemberChain(node);
+      if (chain !== null) {
+        if (chain.length === 0) return false;
+        // `.length` might read array/string length -> capture parent array/string in full
+        if (chain[chain.length - 1] === "length") {
+          if (chain.length === 1) return false;
+          markProjectionPath(root, chain.slice(0, -1), false);
+        } else {
+          markProjectionPath(root, chain, truthinessContext);
+        }
+        return true;
+      }
+      return collectExprProjection(node.object, root, false);
+    }
+    case "index": {
+      if (!collectExprProjection(node.index, root, false)) {
+        return false;
+      }
+      const chain = extractCurrentMemberChain(node);
+      if (chain !== null) {
+        if (chain.length === 0) return false;
+        markProjectionPath(root, chain, truthinessContext);
+        return true;
+      }
+      const objChain = extractCurrentMemberChain(node.object);
+      if (objChain !== null) {
+        if (objChain.length === 0) return false;
+        markProjectionPath(root, objChain, false);
+        return true;
+      }
+      return collectExprProjection(node.object, root, false);
+    }
+    case "unary":
+      return collectExprProjection(
+        node.argument,
+        root,
+        node.op === "!" ? true : false
+      );
+    case "logical":
+      return (
+        collectExprProjection(node.left, root, truthinessContext) &&
+        collectExprProjection(node.right, root, truthinessContext)
+      );
+    case "binary":
+      return (
+        collectExprProjection(node.left, root, false) &&
+        collectExprProjection(node.right, root, false)
+      );
+  }
+}
+
+function buildFilterProjection(
+  ast: ExprNode,
+  remainingSteps: JsonPathStep[]
+): FilterProjectionNode | null {
+  if (remainingSteps.length === 0) {
+    return null;
+  }
+  const root = createProjectionNode();
+  if (!collectExprProjection(ast, root, true)) {
+    return null;
+  }
+
+  let cursors: FilterProjectionNode[] = [root];
+  for (let i = 0; i < remainingSteps.length; i++) {
+    const step = remainingSteps[i];
+    if (step.recursive) {
+      return null;
+    }
+    if (step.kind === "child") {
+      const next: FilterProjectionNode[] = [];
+      for (let c = 0; c < cursors.length; c++) {
+        next.push(getOrCreateChildProj(cursors[c], step.key));
+      }
+      cursors = next;
+    } else if (step.kind === "unionKeys") {
+      const next: FilterProjectionNode[] = [];
+      for (let c = 0; c < cursors.length; c++) {
+        step.keys.forEach((k) => {
+          next.push(getOrCreateChildProj(cursors[c], k));
+        });
+      }
+      cursors = next;
+    } else {
+      // wildcard, index, slice, script, or nested filter at current cursors
+      for (let c = 0; c < cursors.length; c++) {
+        if (cursors[c] === root) {
+          return null;
+        }
+        cursors[c].captureFull = true;
+      }
+      return root;
+    }
+  }
+
+  for (let c = 0; c < cursors.length; c++) {
+    if (cursors[c] === root) {
+      return null;
+    }
+    cursors[c].captureFull = true;
+  }
+  return root;
+}
+
+function unquoteJsonString(raw: string): string {
+  if (raw.indexOf("\\") === -1) {
+    return raw.slice(1, -1);
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw.slice(1, -1);
+  }
+}
+
+function parseJsonScalar(valNode: string): any {
+  if (valNode === "true") return true;
+  if (valNode === "false") return false;
+  if (valNode === "null") return null;
+  if (valNode.length > 0 && valNode.charCodeAt(0) === 0x22) {
+    return unquoteJsonString(valNode);
+  }
+  return Number(valNode);
+}
+
+interface PrunedStackEntry {
+  type: "object" | "array";
+  container: any;
+  projNode: FilterProjectionNode | null;
+  pendingKey: string | null;
+  pendingProj: FilterProjectionNode | null;
+  skippingCurrentValue: boolean;
+}
+
+class PrunedJsBuilder {
+  private stack: PrunedStackEntry[] = [];
+  private skipDepth = 0;
+  done = false;
+  result: any = undefined;
+
+  constructor(private rootProj: FilterProjectionNode) {}
+
+  isSkipping(): boolean {
+    if (this.skipDepth > 0) return true;
+    const len = this.stack.length;
+    return len > 0 && this.stack[len - 1].skippingCurrentValue;
+  }
+
+  openObject(keyNode?: string) {
+    if (this.skipDepth > 0) {
+      this.skipDepth++;
+      return;
+    }
+    const parent = this.stack[this.stack.length - 1];
+    if (parent && parent.skippingCurrentValue) {
+      parent.skippingCurrentValue = false;
+      this.skipDepth = 1;
+      return;
+    }
+    const projNode = !parent
+      ? this.rootProj
+      : parent.type === "object"
+      ? parent.pendingProj
+      : null;
+
+    const obj: any = {};
+    if (!parent) {
+      this.result = obj;
+    } else if (parent.type === "object") {
+      parent.container[parent.pendingKey as string] = obj;
+      parent.pendingKey = null;
+      parent.pendingProj = null;
+    } else {
+      parent.container.push(obj);
+    }
+
+    this.stack.push({
+      type: "object",
+      container: obj,
+      projNode: projNode && !projNode.captureFull ? projNode : null,
+      pendingKey: null,
+      pendingProj: null,
+      skippingCurrentValue: false,
+    });
+
+    if (keyNode !== undefined) {
+      this.key(keyNode);
+    }
+  }
+
+  closeObject() {
+    if (this.skipDepth > 0) {
+      this.skipDepth--;
+      if (this.skipDepth === 0 && this.stack.length === 0) {
+        this.done = true;
+      }
+      return;
+    }
+    this.stack.pop();
     if (this.stack.length === 0) {
       this.done = true;
+    }
+  }
+
+  openArray() {
+    if (this.skipDepth > 0) {
+      this.skipDepth++;
+      return;
+    }
+    const parent = this.stack[this.stack.length - 1];
+    if (parent && parent.skippingCurrentValue) {
+      parent.skippingCurrentValue = false;
+      this.skipDepth = 1;
+      return;
+    }
+    const projNode = !parent
+      ? this.rootProj
+      : parent.type === "object"
+      ? parent.pendingProj
+      : null;
+
+    const arr: any[] = [];
+    if (!parent) {
+      this.result = arr;
+    } else if (parent.type === "object") {
+      parent.container[parent.pendingKey as string] = arr;
+      parent.pendingKey = null;
+      parent.pendingProj = null;
+    } else {
+      parent.container.push(arr);
+    }
+
+    if (projNode && !projNode.captureFull) {
+      this.skipDepth = 1;
+      return;
+    }
+
+    this.stack.push({
+      type: "array",
+      container: arr,
+      projNode: null,
+      pendingKey: null,
+      pendingProj: null,
+      skippingCurrentValue: false,
+    });
+  }
+
+  closeArray() {
+    if (this.skipDepth > 0) {
+      this.skipDepth--;
+      if (this.skipDepth === 0 && this.stack.length === 0) {
+        this.done = true;
+      }
+      return;
+    }
+    this.stack.pop();
+    if (this.stack.length === 0) {
+      this.done = true;
+    }
+  }
+
+  key(keyNode: string) {
+    if (this.skipDepth > 0) {
+      return;
+    }
+    const top = this.stack[this.stack.length - 1];
+    const k = unquoteJsonString(keyNode);
+    if (top.projNode === null) {
+      top.pendingKey = k;
+    } else {
+      const childProj = top.projNode.children.get(k);
+      if (childProj === undefined) {
+        top.skippingCurrentValue = true;
+      } else {
+        top.pendingKey = k;
+        top.pendingProj = childProj;
+        top.skippingCurrentValue = false;
+      }
+    }
+  }
+
+  value(valNode: string) {
+    if (this.skipDepth > 0) {
+      return;
+    }
+    const top = this.stack[this.stack.length - 1];
+    if (!top) {
+      this.result = parseJsonScalar(valNode);
+      this.done = true;
+      return;
+    }
+    if (top.skippingCurrentValue) {
+      top.skippingCurrentValue = false;
+      return;
+    }
+    const val = parseJsonScalar(valNode);
+    if (top.type === "object") {
+      top.container[top.pendingKey as string] = val;
+      top.pendingKey = null;
+      top.pendingProj = null;
+    } else {
+      top.container.push(val);
     }
   }
 }
@@ -815,7 +1206,8 @@ interface ActiveCapture {
 
 interface ActiveFilter {
   slot: PendingSlot;
-  collector: JsonValueCollector;
+  collector: JsonValueCollector | null;
+  builder: PrunedJsBuilder | null;
   step: Extract<JsonPathStep, { kind: "filter" }>;
   nextStepIndex: number;
 }
@@ -847,20 +1239,106 @@ function pushUnique(arr: number[], val: number) {
   }
 }
 
-export class StreamingPathEngine {
+export class StreamingPathEngine implements SaxHandler {
   private frameStack: Frame[] = [];
   private pendingSlots: PendingSlot[] = [];
   private activeCaptures: ActiveCapture[] = [];
   private activeFilters: ActiveFilter[] = [];
+  private activeElCollectors: ActiveArrayCollector[] = [];
   private hasEmitted = false;
   private rootPendingSteps: number[] = [];
+  private skipDepth = 0;
+  private filterProjections: Array<FilterProjectionNode | null> = [];
+  private rootMaxIndex: number | null = null;
+  private earlyExited = false;
+
+  skipDecode = false;
+  onend: () => void = () => {};
+  onclose: () => void = () => {};
+  onerror: (er: any) => void = () => {};
 
   constructor(
     private steps: JsonPathStep[],
-    private emitOutput: (chunk: string) => void
+    private emitOutput: (chunk: string) => void,
+    private onEarlyExit?: () => void
   ) {
     if (steps.length > 0) {
       this.rootPendingSteps = [0];
+      const s0 = steps[0];
+      if (!s0.recursive) {
+        if (s0.kind === "index" && !s0.rawIndexes.some((n) => n < 0)) {
+          this.rootMaxIndex = Math.max(...s0.rawIndexes);
+        } else if (
+          s0.kind === "slice" &&
+          (s0.start === undefined || s0.start >= 0) &&
+          s0.end !== undefined &&
+          s0.end > 0
+        ) {
+          this.rootMaxIndex = s0.end - 1;
+        } else if (
+          s0.kind === "script" &&
+          s0.staticIndex !== undefined &&
+          s0.staticIndex >= 0
+        ) {
+          this.rootMaxIndex = s0.staticIndex;
+        }
+      }
+      for (let i = 0; i < steps.length; i++) {
+        const st = steps[i];
+        if (st.kind === "filter") {
+          this.filterProjections[i] = buildFilterProjection(
+            st.ast,
+            steps.slice(i + 1)
+          );
+        } else {
+          this.filterProjections[i] = null;
+        }
+      }
+    }
+  }
+
+  private updateSkipDecode() {
+    if (
+      this.activeCaptures.length === 0 &&
+      this.activeElCollectors.length === 0
+    ) {
+      if (this.skipDepth > 0 && this.activeFilters.length === 0) {
+        this.skipDecode = true;
+        return;
+      }
+      if (this.activeFilters.length > 0 && this.skipDepth > 0) {
+        let allSkipping = true;
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          const b = this.activeFilters[i].builder;
+          if (!b || !b.isSkipping()) {
+            allSkipping = false;
+            break;
+          }
+        }
+        this.skipDecode = allSkipping;
+        return;
+      }
+    }
+    this.skipDecode = false;
+  }
+
+  private checkEarlyExit() {
+    if (
+      !this.earlyExited &&
+      this.rootMaxIndex !== null &&
+      this.skipDepth === 0 &&
+      this.frameStack.length === 1 &&
+      this.frameStack[0].type === "array" &&
+      this.frameStack[0].elementIndex >= this.rootMaxIndex &&
+      this.activeCaptures.length === 0 &&
+      this.activeFilters.length === 0 &&
+      this.activeElCollectors.length === 0 &&
+      this.pendingSlots.length === 0
+    ) {
+      this.earlyExited = true;
+      if (this.onEarlyExit) {
+        this.onEarlyExit();
+      }
     }
   }
 
@@ -918,13 +1396,16 @@ export class StreamingPathEngine {
   }
 
   private startFilterCandidate(
+    stepIndex: number,
     step: Extract<JsonPathStep, { kind: "filter" }>,
     nextStepIndex: number
   ): ActiveFilter {
     const slot = this.createSlot(false);
+    const proj = this.filterProjections[stepIndex];
     const filter: ActiveFilter = {
       slot,
-      collector: new JsonValueCollector(),
+      collector: proj ? null : new JsonValueCollector(),
+      builder: proj ? new PrunedJsBuilder(proj) : null,
       step,
       nextStepIndex,
     };
@@ -940,7 +1421,23 @@ export class StreamingPathEngine {
   }
 
   private finalizeFilter(flt: ActiveFilter) {
-    const raw = flt.collector.chunks.join("");
+    if (flt.builder) {
+      const parsed = flt.builder.result;
+      if (ConditionEval.evalAst(flt.step.ast, parsed)) {
+        const matched = evaluateStepsOnValue(
+          parsed,
+          this.steps,
+          flt.nextStepIndex
+        );
+        for (let i = 0; i < matched.length; i++) {
+          flt.slot.results.push(JSON.stringify(matched[i]));
+        }
+      }
+      flt.slot.done = true;
+      return;
+    }
+
+    const raw = (flt.collector as JsonValueCollector).chunks.join("");
     let parsed: any;
     try {
       parsed = JSON.parse(raw);
@@ -1031,7 +1528,8 @@ export class StreamingPathEngine {
       }
     }
 
-    const baseOffset = ac.tailKeep !== null ? Math.max(0, length - ac.tailKeep) : 0;
+    const baseOffset =
+      ac.tailKeep !== null ? Math.max(0, length - ac.tailKeep) : 0;
     for (let i = 0; i < matchedIndexes.length; i++) {
       const arrIdx = matchedIndexes[i] - baseOffset;
       if (arrIdx < 0 || arrIdx >= ac.elements.length) {
@@ -1042,7 +1540,11 @@ export class StreamingPathEngine {
         ac.slot.results.push(rawEl);
       } else {
         const parsedEl = JSON.parse(rawEl);
-        const sub = evaluateStepsOnValue(parsedEl, this.steps, ac.nextStepIndex);
+        const sub = evaluateStepsOnValue(
+          parsedEl,
+          this.steps,
+          ac.nextStepIndex
+        );
         for (let j = 0; j < sub.length; j++) {
           ac.slot.results.push(JSON.stringify(sub[j]));
         }
@@ -1063,33 +1565,17 @@ export class StreamingPathEngine {
     }
   }
 
-  private collectActiveElementCollectors(): ActiveArrayCollector[] {
-    const out: ActiveArrayCollector[] = [];
-    for (let i = 0; i < this.frameStack.length; i++) {
-      const cols = this.frameStack[i].arrayCollectors;
-      for (let j = 0; j < cols.length; j++) {
-        if (cols[j].currentElementCollector) {
-          out.push(cols[j]);
-        }
-      }
-    }
-    return out;
-  }
-
   private handleObjectKey(frame: Frame, keyNode: string) {
-    let keyStr: string;
-    try {
-      keyStr = JSON.parse(keyNode);
-    } catch {
-      keyStr = keyNode.slice(1, -1);
+    frame.pendingChildSteps.length = 0;
+    const activeSteps = frame.activeSteps;
+    if (activeSteps.length === 0) {
+      return;
     }
-    frame.pendingChildSteps = [];
 
-    const newCaptures: ActiveCapture[] = [];
-    const newFilters: ActiveFilter[] = [];
+    const keyStr = unquoteJsonString(keyNode);
 
-    for (let i = 0; i < frame.activeSteps.length; i++) {
-      const stepIdx = frame.activeSteps[i];
+    for (let i = 0; i < activeSteps.length; i++) {
+      const stepIdx = activeSteps[i];
       const step = this.steps[stepIdx];
       let matched = false;
 
@@ -1100,14 +1586,13 @@ export class StreamingPathEngine {
       } else if (step.kind === "wildcard") {
         matched = true;
       } else if (step.kind === "filter") {
-        // Object member value filter
-        newFilters.push(this.startFilterCandidate(step, stepIdx + 1));
+        this.startFilterCandidate(stepIdx, step, stepIdx + 1);
       }
 
       if (matched) {
         const nextIdx = stepIdx + 1;
         if (nextIdx >= this.steps.length) {
-          newCaptures.push(this.startDirectCapture());
+          this.startDirectCapture();
         } else {
           pushUnique(frame.pendingChildSteps, nextIdx);
         }
@@ -1117,40 +1602,31 @@ export class StreamingPathEngine {
         pushUnique(frame.pendingChildSteps, stepIdx);
       }
     }
-    // Note: newCaptures and newFilters wait for the NEXT event (the property's value).
-    void newCaptures;
-    void newFilters;
   }
 
   private evaluateArrayElementSteps(
     frame: Frame,
     isScalar: boolean,
     scalarNode?: string
-  ): {
-    elementSteps: number[];
-    newCaptures: ActiveCapture[];
-    newFilters: ActiveFilter[];
-    newElementCollectors: ActiveArrayCollector[];
-  } {
+  ): number[] {
     frame.elementIndex++;
     const idx = frame.elementIndex;
     const elementSteps: number[] = [];
-    const newCaptures: ActiveCapture[] = [];
-    const newFilters: ActiveFilter[] = [];
-    const newElementCollectors: ActiveArrayCollector[] = [];
 
-    for (let i = 0; i < frame.arrayCollectors.length; i++) {
-      const ac = frame.arrayCollectors[i];
+    const frameCols = frame.arrayCollectors;
+    for (let i = 0; i < frameCols.length; i++) {
+      const ac = frameCols[i];
       if (isScalar && scalarNode !== undefined) {
         this.pushCollectedElement(ac, scalarNode);
       } else {
         ac.currentElementCollector = new JsonValueCollector();
-        newElementCollectors.push(ac);
+        this.activeElCollectors.push(ac);
       }
     }
 
-    for (let i = 0; i < frame.activeSteps.length; i++) {
-      const stepIdx = frame.activeSteps[i];
+    const activeSteps = frame.activeSteps;
+    for (let i = 0; i < activeSteps.length; i++) {
+      const stepIdx = activeSteps[i];
       const step = this.steps[stepIdx];
       let matched = false;
 
@@ -1165,7 +1641,11 @@ export class StreamingPathEngine {
         if (!hasNeg) {
           const start = step.start !== undefined ? step.start : 0;
           const end = step.end !== undefined ? step.end : 0;
-          if (idx >= start && (end <= 0 || idx < end) && (idx - start) % step.step === 0) {
+          if (
+            idx >= start &&
+            (end <= 0 || idx < end) &&
+            (idx - start) % step.step === 0
+          ) {
             matched = true;
           }
         }
@@ -1201,7 +1681,7 @@ export class StreamingPathEngine {
             }
           }
         } else {
-          newFilters.push(this.startFilterCandidate(step, stepIdx + 1));
+          this.startFilterCandidate(stepIdx, step, stepIdx + 1);
         }
       }
 
@@ -1217,7 +1697,7 @@ export class StreamingPathEngine {
             }
             slot.done = true;
           } else {
-            newCaptures.push(this.startDirectCapture());
+            this.startDirectCapture();
           }
         } else {
           pushUnique(elementSteps, nextIdx);
@@ -1229,43 +1709,83 @@ export class StreamingPathEngine {
       }
     }
 
-    return { elementSteps, newCaptures, newFilters, newElementCollectors };
+    return elementSteps;
   }
 
   onopenobject(keyNode?: string) {
+    if (this.skipDepth > 0) {
+      if (!this.skipDecode) {
+        for (let i = 0; i < this.activeCaptures.length; i++) {
+          this.activeCaptures[i].collector.openObject(keyNode);
+        }
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          const flt = this.activeFilters[i];
+          if (flt.builder) flt.builder.openObject(keyNode);
+          else (flt.collector as JsonValueCollector).openObject(keyNode);
+        }
+        for (let i = 0; i < this.activeElCollectors.length; i++) {
+          this.activeElCollectors[i].currentElementCollector?.openObject(
+            keyNode
+          );
+        }
+        if (this.activeFilters.length > 0) {
+          this.updateSkipDecode();
+        }
+      } else if (this.activeFilters.length > 0) {
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          this.activeFilters[i].builder?.openObject(keyNode);
+        }
+        this.updateSkipDecode();
+      }
+      this.skipDepth++;
+      return;
+    }
+
     // 1. Forward to already-active captures, filters, and array element collectors
-    for (let i = 0; i < this.activeCaptures.length; i++) {
+    const prevCaptureCount = this.activeCaptures.length;
+    const prevFilterCount = this.activeFilters.length;
+    const prevElColCount = this.activeElCollectors.length;
+
+    for (let i = 0; i < prevCaptureCount; i++) {
       this.activeCaptures[i].collector.openObject(keyNode);
     }
-    for (let i = 0; i < this.activeFilters.length; i++) {
-      this.activeFilters[i].collector.openObject(keyNode);
+    for (let i = 0; i < prevFilterCount; i++) {
+      const flt = this.activeFilters[i];
+      if (flt.builder) flt.builder.openObject(keyNode);
+      else (flt.collector as JsonValueCollector).openObject(keyNode);
     }
-    const existingElCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < existingElCols.length; i++) {
-      existingElCols[i].currentElementCollector?.openObject(keyNode);
+    for (let i = 0; i < prevElColCount; i++) {
+      this.activeElCollectors[i].currentElementCollector?.openObject(keyNode);
     }
 
     // 2. Determine incoming steps for this new object
-    let incomingSteps: number[] = [];
+    let incomingSteps: number[];
     const parent = this.frameStack[this.frameStack.length - 1];
     if (!parent) {
-      incomingSteps = this.rootPendingSteps.slice();
+      incomingSteps = this.rootPendingSteps;
       this.rootPendingSteps = [];
     } else if (parent.type === "object") {
-      incomingSteps = parent.pendingChildSteps.slice();
+      incomingSteps = parent.pendingChildSteps;
       parent.pendingChildSteps = [];
     } else {
-      const res = this.evaluateArrayElementSteps(parent, false);
-      incomingSteps = res.elementSteps;
-      for (let i = 0; i < res.newCaptures.length; i++) {
-        res.newCaptures[i].collector.openObject(keyNode);
+      incomingSteps = this.evaluateArrayElementSteps(parent, false);
+      for (let i = prevCaptureCount; i < this.activeCaptures.length; i++) {
+        this.activeCaptures[i].collector.openObject(keyNode);
       }
-      for (let i = 0; i < res.newFilters.length; i++) {
-        res.newFilters[i].collector.openObject(keyNode);
+      for (let i = prevFilterCount; i < this.activeFilters.length; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) flt.builder.openObject(keyNode);
+        else (flt.collector as JsonValueCollector).openObject(keyNode);
       }
-      for (let i = 0; i < res.newElementCollectors.length; i++) {
-        res.newElementCollectors[i].currentElementCollector?.openObject(keyNode);
+      for (let i = prevElColCount; i < this.activeElCollectors.length; i++) {
+        this.activeElCollectors[i].currentElementCollector?.openObject(keyNode);
       }
+    }
+
+    if (incomingSteps.length === 0) {
+      this.skipDepth = 1;
+      this.updateSkipDecode();
+      return;
     }
 
     // 3. Push object frame
@@ -1286,80 +1806,159 @@ export class StreamingPathEngine {
   }
 
   oncloseobject() {
+    if (this.skipDepth > 0) {
+      this.skipDepth--;
+      if (this.skipDecode && this.activeFilters.length === 0) {
+        if (this.skipDepth === 0) {
+          this.updateSkipDecode();
+        }
+        return;
+      }
+      this.advanceCloseObjectOnActive();
+      this.updateSkipDecode();
+      this.flushPendingSlots();
+      this.checkEarlyExit();
+      return;
+    }
+
     this.frameStack.pop();
-
-    const remainingCaptures: ActiveCapture[] = [];
-    for (let i = 0; i < this.activeCaptures.length; i++) {
-      const cap = this.activeCaptures[i];
-      cap.collector.closeObject();
-      if (cap.collector.done) {
-        this.finalizeCapture(cap);
-      } else {
-        remainingCaptures.push(cap);
-      }
-    }
-    this.activeCaptures = remainingCaptures;
-
-    const remainingFilters: ActiveFilter[] = [];
-    for (let i = 0; i < this.activeFilters.length; i++) {
-      const flt = this.activeFilters[i];
-      flt.collector.closeObject();
-      if (flt.collector.done) {
-        this.finalizeFilter(flt);
-      } else {
-        remainingFilters.push(flt);
-      }
-    }
-    this.activeFilters = remainingFilters;
-
-    const elCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < elCols.length; i++) {
-      const ac = elCols[i];
-      const col = ac.currentElementCollector as JsonValueCollector;
-      col.closeObject();
-      if (col.done) {
-        this.pushCollectedElement(ac, col.chunks.join(""));
-        ac.currentElementCollector = null;
-      }
-    }
-
+    this.advanceCloseObjectOnActive();
+    this.updateSkipDecode();
     this.flushPendingSlots();
+    this.checkEarlyExit();
+  }
+
+  private advanceCloseObjectOnActive() {
+    const capLen = this.activeCaptures.length;
+    if (capLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < capLen; i++) {
+        const cap = this.activeCaptures[i];
+        cap.collector.closeObject();
+        if (cap.collector.done) {
+          this.finalizeCapture(cap);
+        } else {
+          this.activeCaptures[writeIdx++] = cap;
+        }
+      }
+      this.activeCaptures.length = writeIdx;
+    }
+
+    const fltLen = this.activeFilters.length;
+    if (fltLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < fltLen; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) {
+          flt.builder.closeObject();
+          if (flt.builder.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        } else {
+          const col = flt.collector as JsonValueCollector;
+          col.closeObject();
+          if (col.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        }
+      }
+      this.activeFilters.length = writeIdx;
+    }
+
+    const elLen = this.activeElCollectors.length;
+    if (elLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < elLen; i++) {
+        const ac = this.activeElCollectors[i];
+        const col = ac.currentElementCollector as JsonValueCollector;
+        col.closeObject();
+        if (col.done) {
+          this.pushCollectedElement(ac, col.chunks.join(""));
+          ac.currentElementCollector = null;
+        } else {
+          this.activeElCollectors[writeIdx++] = ac;
+        }
+      }
+      this.activeElCollectors.length = writeIdx;
+    }
   }
 
   onopenarray() {
+    if (this.skipDepth > 0) {
+      if (!this.skipDecode) {
+        for (let i = 0; i < this.activeCaptures.length; i++) {
+          this.activeCaptures[i].collector.openArray();
+        }
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          const flt = this.activeFilters[i];
+          if (flt.builder) flt.builder.openArray();
+          else (flt.collector as JsonValueCollector).openArray();
+        }
+        for (let i = 0; i < this.activeElCollectors.length; i++) {
+          this.activeElCollectors[i].currentElementCollector?.openArray();
+        }
+        if (this.activeFilters.length > 0) {
+          this.updateSkipDecode();
+        }
+      } else if (this.activeFilters.length > 0) {
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          this.activeFilters[i].builder?.openArray();
+        }
+        this.updateSkipDecode();
+      }
+      this.skipDepth++;
+      return;
+    }
+
     // 1. Forward to already-active captures, filters, and array element collectors
-    for (let i = 0; i < this.activeCaptures.length; i++) {
+    const prevCaptureCount = this.activeCaptures.length;
+    const prevFilterCount = this.activeFilters.length;
+    const prevElColCount = this.activeElCollectors.length;
+
+    for (let i = 0; i < prevCaptureCount; i++) {
       this.activeCaptures[i].collector.openArray();
     }
-    for (let i = 0; i < this.activeFilters.length; i++) {
-      this.activeFilters[i].collector.openArray();
+    for (let i = 0; i < prevFilterCount; i++) {
+      const flt = this.activeFilters[i];
+      if (flt.builder) flt.builder.openArray();
+      else (flt.collector as JsonValueCollector).openArray();
     }
-    const existingElCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < existingElCols.length; i++) {
-      existingElCols[i].currentElementCollector?.openArray();
+    for (let i = 0; i < prevElColCount; i++) {
+      this.activeElCollectors[i].currentElementCollector?.openArray();
     }
 
     // 2. Determine incoming steps for this new array
-    let incomingSteps: number[] = [];
+    let incomingSteps: number[];
     const parent = this.frameStack[this.frameStack.length - 1];
     if (!parent) {
-      incomingSteps = this.rootPendingSteps.slice();
+      incomingSteps = this.rootPendingSteps;
       this.rootPendingSteps = [];
     } else if (parent.type === "object") {
-      incomingSteps = parent.pendingChildSteps.slice();
+      incomingSteps = parent.pendingChildSteps;
       parent.pendingChildSteps = [];
     } else {
-      const res = this.evaluateArrayElementSteps(parent, false);
-      incomingSteps = res.elementSteps;
-      for (let i = 0; i < res.newCaptures.length; i++) {
-        res.newCaptures[i].collector.openArray();
+      incomingSteps = this.evaluateArrayElementSteps(parent, false);
+      for (let i = prevCaptureCount; i < this.activeCaptures.length; i++) {
+        this.activeCaptures[i].collector.openArray();
       }
-      for (let i = 0; i < res.newFilters.length; i++) {
-        res.newFilters[i].collector.openArray();
+      for (let i = prevFilterCount; i < this.activeFilters.length; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) flt.builder.openArray();
+        else (flt.collector as JsonValueCollector).openArray();
       }
-      for (let i = 0; i < res.newElementCollectors.length; i++) {
-        res.newElementCollectors[i].currentElementCollector?.openArray();
+      for (let i = prevElColCount; i < this.activeElCollectors.length; i++) {
+        this.activeElCollectors[i].currentElementCollector?.openArray();
       }
+    }
+
+    if (incomingSteps.length === 0) {
+      this.skipDepth = 1;
+      this.updateSkipDecode();
+      return;
     }
 
     // 3. Push array frame & attach any dynamic array collectors (e.g. @.length, negative slice/index)
@@ -1389,42 +1988,23 @@ export class StreamingPathEngine {
   }
 
   onclosearray() {
+    if (this.skipDepth > 0) {
+      this.skipDepth--;
+      if (this.skipDecode && this.activeFilters.length === 0) {
+        if (this.skipDepth === 0) {
+          this.updateSkipDecode();
+        }
+        return;
+      }
+      this.advanceCloseArrayOnActive();
+      this.updateSkipDecode();
+      this.flushPendingSlots();
+      this.checkEarlyExit();
+      return;
+    }
+
     const closedFrame = this.frameStack.pop();
-
-    const remainingCaptures: ActiveCapture[] = [];
-    for (let i = 0; i < this.activeCaptures.length; i++) {
-      const cap = this.activeCaptures[i];
-      cap.collector.closeArray();
-      if (cap.collector.done) {
-        this.finalizeCapture(cap);
-      } else {
-        remainingCaptures.push(cap);
-      }
-    }
-    this.activeCaptures = remainingCaptures;
-
-    const remainingFilters: ActiveFilter[] = [];
-    for (let i = 0; i < this.activeFilters.length; i++) {
-      const flt = this.activeFilters[i];
-      flt.collector.closeArray();
-      if (flt.collector.done) {
-        this.finalizeFilter(flt);
-      } else {
-        remainingFilters.push(flt);
-      }
-    }
-    this.activeFilters = remainingFilters;
-
-    const elCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < elCols.length; i++) {
-      const ac = elCols[i];
-      const col = ac.currentElementCollector as JsonValueCollector;
-      col.closeArray();
-      if (col.done) {
-        this.pushCollectedElement(ac, col.chunks.join(""));
-        ac.currentElementCollector = null;
-      }
-    }
+    this.advanceCloseArrayOnActive();
 
     if (closedFrame && closedFrame.arrayCollectors.length > 0) {
       for (let i = 0; i < closedFrame.arrayCollectors.length; i++) {
@@ -1432,19 +2012,102 @@ export class StreamingPathEngine {
       }
     }
 
+    this.updateSkipDecode();
     this.flushPendingSlots();
+    this.checkEarlyExit();
+  }
+
+  private advanceCloseArrayOnActive() {
+    const capLen = this.activeCaptures.length;
+    if (capLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < capLen; i++) {
+        const cap = this.activeCaptures[i];
+        cap.collector.closeArray();
+        if (cap.collector.done) {
+          this.finalizeCapture(cap);
+        } else {
+          this.activeCaptures[writeIdx++] = cap;
+        }
+      }
+      this.activeCaptures.length = writeIdx;
+    }
+
+    const fltLen = this.activeFilters.length;
+    if (fltLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < fltLen; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) {
+          flt.builder.closeArray();
+          if (flt.builder.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        } else {
+          const col = flt.collector as JsonValueCollector;
+          col.closeArray();
+          if (col.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        }
+      }
+      this.activeFilters.length = writeIdx;
+    }
+
+    const elLen = this.activeElCollectors.length;
+    if (elLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < elLen; i++) {
+        const ac = this.activeElCollectors[i];
+        const col = ac.currentElementCollector as JsonValueCollector;
+        col.closeArray();
+        if (col.done) {
+          this.pushCollectedElement(ac, col.chunks.join(""));
+          ac.currentElementCollector = null;
+        } else {
+          this.activeElCollectors[writeIdx++] = ac;
+        }
+      }
+      this.activeElCollectors.length = writeIdx;
+    }
   }
 
   onkey(keyNode: string) {
+    if (this.skipDepth > 0) {
+      if (this.skipDecode) {
+        return;
+      }
+      for (let i = 0; i < this.activeCaptures.length; i++) {
+        this.activeCaptures[i].collector.key(keyNode);
+      }
+      for (let i = 0; i < this.activeFilters.length; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) flt.builder.key(keyNode);
+        else (flt.collector as JsonValueCollector).key(keyNode);
+      }
+      for (let i = 0; i < this.activeElCollectors.length; i++) {
+        this.activeElCollectors[i].currentElementCollector?.key(keyNode);
+      }
+      if (this.activeFilters.length > 0) {
+        this.updateSkipDecode();
+      }
+      return;
+    }
+
     for (let i = 0; i < this.activeCaptures.length; i++) {
       this.activeCaptures[i].collector.key(keyNode);
     }
     for (let i = 0; i < this.activeFilters.length; i++) {
-      this.activeFilters[i].collector.key(keyNode);
+      const flt = this.activeFilters[i];
+      if (flt.builder) flt.builder.key(keyNode);
+      else (flt.collector as JsonValueCollector).key(keyNode);
     }
-    const elCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < elCols.length; i++) {
-      elCols[i].currentElementCollector?.key(keyNode);
+    for (let i = 0; i < this.activeElCollectors.length; i++) {
+      this.activeElCollectors[i].currentElementCollector?.key(keyNode);
     }
 
     const top = this.frameStack[this.frameStack.length - 1];
@@ -1454,50 +2117,86 @@ export class StreamingPathEngine {
   }
 
   onvalue(valNode: string) {
-    // 1. Forward to already-active captures, filters, and array element collectors
-    const remainingCaptures: ActiveCapture[] = [];
-    for (let i = 0; i < this.activeCaptures.length; i++) {
-      const cap = this.activeCaptures[i];
-      cap.collector.value(valNode);
-      if (cap.collector.done) {
-        this.finalizeCapture(cap);
-      } else {
-        remainingCaptures.push(cap);
+    if (this.skipDepth > 0) {
+      if (this.skipDecode && this.activeFilters.length === 0) {
+        return;
       }
-    }
-    this.activeCaptures = remainingCaptures;
-
-    const remainingFilters: ActiveFilter[] = [];
-    for (let i = 0; i < this.activeFilters.length; i++) {
-      const flt = this.activeFilters[i];
-      flt.collector.value(valNode);
-      if (flt.collector.done) {
-        this.finalizeFilter(flt);
-      } else {
-        remainingFilters.push(flt);
-      }
-    }
-    this.activeFilters = remainingFilters;
-
-    const elCols = this.collectActiveElementCollectors();
-    for (let i = 0; i < elCols.length; i++) {
-      const ac = elCols[i];
-      const col = ac.currentElementCollector as JsonValueCollector;
-      col.value(valNode);
-      if (col.done) {
-        this.pushCollectedElement(ac, col.chunks.join(""));
-        ac.currentElementCollector = null;
-      }
+      this.advanceValueOnActive(valNode);
+      this.updateSkipDecode();
+      this.flushPendingSlots();
+      return;
     }
 
-    // 2. If inside an array, evaluate array element steps for this scalar!
+    this.advanceValueOnActive(valNode);
+
     const top = this.frameStack[this.frameStack.length - 1];
     if (top && top.type === "object") {
-      top.pendingChildSteps = [];
+      top.pendingChildSteps.length = 0;
     } else if (top && top.type === "array") {
       this.evaluateArrayElementSteps(top, true, valNode);
     }
 
+    this.updateSkipDecode();
     this.flushPendingSlots();
+    this.checkEarlyExit();
+  }
+
+  private advanceValueOnActive(valNode: string) {
+    const capLen = this.activeCaptures.length;
+    if (capLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < capLen; i++) {
+        const cap = this.activeCaptures[i];
+        cap.collector.value(valNode);
+        if (cap.collector.done) {
+          this.finalizeCapture(cap);
+        } else {
+          this.activeCaptures[writeIdx++] = cap;
+        }
+      }
+      this.activeCaptures.length = writeIdx;
+    }
+
+    const fltLen = this.activeFilters.length;
+    if (fltLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < fltLen; i++) {
+        const flt = this.activeFilters[i];
+        if (flt.builder) {
+          flt.builder.value(valNode);
+          if (flt.builder.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        } else {
+          const col = flt.collector as JsonValueCollector;
+          col.value(valNode);
+          if (col.done) {
+            this.finalizeFilter(flt);
+          } else {
+            this.activeFilters[writeIdx++] = flt;
+          }
+        }
+      }
+      this.activeFilters.length = writeIdx;
+    }
+
+    const elLen = this.activeElCollectors.length;
+    if (elLen > 0) {
+      let writeIdx = 0;
+      for (let i = 0; i < elLen; i++) {
+        const ac = this.activeElCollectors[i];
+        const col = ac.currentElementCollector as JsonValueCollector;
+        col.value(valNode);
+        if (col.done) {
+          this.pushCollectedElement(ac, col.chunks.join(""));
+          ac.currentElementCollector = null;
+        } else {
+          this.activeElCollectors[writeIdx++] = ac;
+        }
+      }
+      this.activeElCollectors.length = writeIdx;
+    }
   }
 }
