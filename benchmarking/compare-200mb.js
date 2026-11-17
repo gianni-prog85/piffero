@@ -354,7 +354,18 @@ async function main() {
       runs: 2,
     },
     {
-      name: "9. Array slice early-exit ($[0:10:2])",
+      name: "9. RFC 9535 filter without parens ($[?@.payload.issue].payload.issue.number)",
+      piffero: "$[?@.payload.issue].payload.issue.number",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: { pattern: "![*].payload{issue}.issue.number", abort: false },
+      sp: null,
+      jpp: null,
+      runs: 2,
+    },
+    {
+      name: "10. Array slice early-exit ($[0:10:2])",
       piffero: "$[0:10:2]",
       sapient: null,
       sj: null,
@@ -365,7 +376,7 @@ async function main() {
       runs: 3,
     },
     {
-      name: "10. Reverse slice ($[10:0:-1])",
+      name: "11. Reverse slice ($[10:0:-1])",
       piffero: "$[10:0:-1]",
       sapient: null,
       sj: null,

@@ -15,6 +15,7 @@ Side-by-side comparison across all 8 tested libraries (`Piffero`, `@sapientpro/j
 | **Recursive descent (`..`)** | ✅ | ✅ | Via RegExp | ❌ (throws) | ❌ (throws) | ✅ | Key-only (`'prop'`) | ✅ |
 | **Array slices (`[start:end:step]`, negative/zero step, unions)** | ✅ (RFC 9535) | ❌ (throws) | ❌ | ❌ (`Unsupported node: SliceSelector`) | ❌ (throws) | Partial (no slices) | ❌ | ✅ (RFC 9535 slices) |
 | **Compound filters (`?()`) & script expressions (`()`)** | ✅ | ❌ (throws) | Custom JS filter | ❌ (throws) | ❌ (throws) | Duck-typing `{prop}` only | Predicate fn only | ✅ |
+| **RFC 9535 filters without parens (`?[?@.prop]`)** | ✅ | ❌ (throws) | ❌ | ❌ (parses, then throws) | ❌ (throws) | Duck-typing `{prop}` only | ❌ | ❌ (returns `[]`) |
 | **Safe missing intermediate property access in filters** | ✅ | N/A | N/A | N/A | N/A | N/A | N/A | ❌ (throws `TypeError`) |
 | **Preserves JSON `null` values** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (skipped as EOF) | ✅ |
 | **Built-in TypeScript declarations** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (DefinitelyTyped) | ❌ | ✅ |

@@ -261,6 +261,32 @@ describe("JSONPath complete features", function () {
       const out = await Piffero.findAsPromise(makeStream(data), "$..[?(@.a === 1)].val");
       expect(JSON.parse(out)).toEqual(["outer", "inner"]);
     });
+
+    it("should support RFC 9535 filter expressions without outer parentheses ?[...]", async function () {
+      const out1 = await Piffero.findAsPromise(
+        makeStream(sampleEmployees),
+        "$.items[?@.price < 10].name"
+      );
+      expect(JSON.parse(out1)).toEqual(["Pen"]);
+
+      const out2 = await Piffero.findAsPromise(
+        makeStream(sampleEmployees),
+        "$.items[?@.inStock && @.price >= 15].name"
+      );
+      expect(JSON.parse(out2)).toEqual(["Book", "Desk"]);
+
+      const out3 = await Piffero.findAsPromise(
+        makeStream(sampleEmployees),
+        "$.items[?(@.price < 5 || @.price > 500) && !@.inStock].name"
+      );
+      expect(JSON.parse(out3)).toEqual(["Laptop"]);
+
+      const out4 = await Piffero.findAsPromise(
+        makeStream(sampleEmployees),
+        "$.scores[?@ > 12]"
+      );
+      expect(JSON.parse(out4)).toEqual([20, 15]);
+    });
   });
 
   describe("Script Expressions () (Issue #12)", function () {
@@ -323,6 +349,7 @@ describe("JSONPath complete features", function () {
         "$...a",
         "$.a[",
         "$.a[]",
+        "$.a[?]",
         "$.a[?()]",
         "$.a[()]",
         "$.a[?(@.x === )]",
