@@ -52,7 +52,7 @@ Allineamento integrale allo standard [RFC 9535](https://www.rfc-editor.org/info/
 
 Ordine di implementazione consigliato (per dipendenze e impatto):
 
-1. [ ] **#20 — Filtri senza parentesi tonde `?[...]`** ([OpenSpec](./openspec/changes/rfc9535-filter-parentheses/proposal.md))
+1. [x] **#20 — Filtri senza parentesi tonde `?[...]`** ([OpenSpec](./openspec/changes/rfc9535-filter-parentheses/proposal.md))
    - Normalizzazione a compile-time in `parseBracketSubscript` con zero overhead runtime e hit rate invariato su `astCache`.
 2. [ ] **#23 — Semantica Slice RFC 9535 (`step < 0`, `step === 0`, `end === 0`)** ([OpenSpec](./openspec/changes/rfc9535-slice-semantics/proposal.md))
    - Algoritmo `Bounds` ufficiale, correzione di `end === 0`, fast-path O(1) preservato per `step > 0` e ring-buffer O(`k`) per tail reverse slice.
