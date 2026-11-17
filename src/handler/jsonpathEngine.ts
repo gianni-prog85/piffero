@@ -699,7 +699,7 @@ function evaluateSingleStepOnValue(
     case "filter": {
       if (Array.isArray(val)) {
         for (let i = 0; i < val.length; i++) {
-          if (ConditionEval.evalAst(step.ast, val[i], rootValue)) {
+          if (ConditionEval.evalFilterAst(step.ast, val[i], rootValue)) {
             results.push(
               ...evaluateStepsOnValue(val[i], steps, nextIndex, rootValue)
             );
@@ -709,7 +709,7 @@ function evaluateSingleStepOnValue(
         const keys = Object.keys(val);
         for (let i = 0; i < keys.length; i++) {
           const child = val[keys[i]];
-          if (ConditionEval.evalAst(step.ast, child, rootValue)) {
+          if (ConditionEval.evalFilterAst(step.ast, child, rootValue)) {
             results.push(
               ...evaluateStepsOnValue(child, steps, nextIndex, rootValue)
             );
@@ -1456,7 +1456,7 @@ export class StreamingPathEngine implements SaxHandler {
   private finalizeFilter(flt: ActiveFilter) {
     if (flt.builder) {
       const parsed = flt.builder.result;
-      if (ConditionEval.evalAst(flt.step.ast, parsed)) {
+      if (ConditionEval.evalFilterAst(flt.step.ast, parsed)) {
         const matched = evaluateStepsOnValue(
           parsed,
           this.steps,
@@ -1477,7 +1477,7 @@ export class StreamingPathEngine implements SaxHandler {
     } catch {
       parsed = undefined;
     }
-    if (ConditionEval.evalAst(flt.step.ast, parsed)) {
+    if (ConditionEval.evalFilterAst(flt.step.ast, parsed)) {
       if (flt.nextStepIndex >= this.steps.length) {
         flt.slot.results.push(raw);
       } else {
@@ -1727,7 +1727,7 @@ export class StreamingPathEngine implements SaxHandler {
           } catch {
             parsed = undefined;
           }
-          if (ConditionEval.evalAst(step.ast, parsed)) {
+          if (ConditionEval.evalFilterAst(step.ast, parsed)) {
             const nextIdx = stepIdx + 1;
             if (nextIdx >= this.steps.length) {
               const slot = this.createSlot(false);

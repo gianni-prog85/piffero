@@ -233,9 +233,16 @@ describe("JSONPath complete features", function () {
 
       const negOut = await Piffero.findAsPromise(
         makeStream(sampleEmployees),
-        "$.items[?(!@.inStock || @.price < 5)].name"
+        "$.items[?(@.inStock == false || @.price < 5)].name"
       );
       expect(JSON.parse(negOut)).toEqual(["Pen", "Laptop"]);
+
+      // Negated existence check (!) matches only when property is absent
+      const missingOut = await Piffero.findAsPromise(
+        makeStream(sampleEmployees),
+        "$.employees[?(!@.isbn)].name"
+      );
+      expect(JSON.parse(missingOut)).toEqual(["John", "Joe"]);
     });
 
     it("should support property existence checks [?(@.isbn)]", async function () {
@@ -249,7 +256,7 @@ describe("JSONPath complete features", function () {
     it("should support root array filters and arithmetic inside filters", async function () {
       const out = await Piffero.findAsPromise(
         makeStream(sampleEmployees.items),
-        "$[?(@.price * 2 >= 30 && @.inStock)].id"
+        "$[?(@.price * 2 >= 30 && @.inStock == true)].id"
       );
       expect(JSON.parse(out)).toEqual([2, 4]);
     });
@@ -271,13 +278,13 @@ describe("JSONPath complete features", function () {
 
       const out2 = await Piffero.findAsPromise(
         makeStream(sampleEmployees),
-        "$.items[?@.inStock && @.price >= 15].name"
+        "$.items[?@.inStock == true && @.price >= 15].name"
       );
       expect(JSON.parse(out2)).toEqual(["Book", "Desk"]);
 
       const out3 = await Piffero.findAsPromise(
         makeStream(sampleEmployees),
-        "$.items[?(@.price < 5 || @.price > 500) && !@.inStock].name"
+        "$.items[?(@.price < 5 || @.price > 500) && @.inStock == false].name"
       );
       expect(JSON.parse(out3)).toEqual(["Laptop"]);
 
@@ -619,6 +626,81 @@ describe("JSONPath complete features", function () {
       for (const p of invalidShorthands) {
         expect(() => parse(p)).toThrowError(PifferoJsonPathError);
       }
+    });
+  });
+
+  describe("RFC 9535 Filter Semantics, Comparisons and Nothing (Issue #24)", function () {
+    it("should distinguish present falsy values from missing properties in existence tests", async function () {
+      const items = [
+        { id: 1, v: false, details: { huge: [1, 2, 3] } },
+        { id: 2, v: 0, details: { huge: "ignored" } },
+        { id: 3, v: "", details: null },
+        { id: 4, v: null, details: false },
+        { id: 5, v: {}, details: [] },
+        { id: 6, v: [] },
+        { id: 7 },
+      ];
+
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.v].id"))).toEqual([
+        1, 2, 3, 4, 5, 6,
+      ]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?!@.v].id"))).toEqual([7]);
+      // With post-filter projection (PrunedJsBuilder usedAsTruthiness path)
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.details].id"))
+      ).toEqual([1, 2, 3, 4, 5]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?!@.details].id"))
+      ).toEqual([6, 7]);
+    });
+
+    it("should evaluate == and != without JS coercion and with Nothing & structural equality", async function () {
+      const items = [
+        { id: 1, a: "1", b: 1, meta: { x: 1, y: [2, 3] }, other: { y: [2, 3], x: 1 } },
+        { id: 2, a: null, b: false, meta: [1, 2], other: { "0": 1, "1": 2 } },
+        { id: 3, a: true, b: 1, meta: null },
+        { id: 4, b: null },
+        { id: 5 },
+      ];
+
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a == 1].id"))).toEqual([
+        // Neither "1" nor true equals number 1
+      ]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a != 1].id"))).toEqual([
+        1, 2, 3, 4, 5,
+      ]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a == null].id"))
+      ).toEqual([2]); // item 4 & 5 have Nothing, not null
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a == @.b].id"))
+      ).toEqual([5]); // Nothing == Nothing on item 5
+      // Structural equality with post-filter projection (PrunedJsBuilder captureFull path)
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.meta == @.other].id"))
+      ).toEqual([1, 4, 5]);
+    });
+
+    it("should enforce type-safe ordered comparisons (<, <=, >, >=)", async function () {
+      const items = [
+        { id: 1, a: "2", b: 1 },
+        { id: 2, a: 2, b: 1 },
+        { id: 3, a: "b", b: "a" },
+        { id: 4, a: null, b: 0 },
+        { id: 5, a: null, b: null },
+        { id: 6, a: false, b: true },
+        { id: 7 },
+      ];
+
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a > @.b].id"))).toEqual(
+        [2, 3]
+      );
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a <= @.b].id"))
+      ).toEqual([5, 7]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(items), "$[?@.a >= 0].id"))
+      ).toEqual([2]);
     });
   });
 });

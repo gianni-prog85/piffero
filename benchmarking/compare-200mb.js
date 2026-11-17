@@ -386,9 +386,40 @@ async function main() {
       jpp: "$[10:0:-1]",
       runs: 2,
     },
+    {
+      name: '12. Equality filter ($[?(@.type == "IssuesEvent")].id)',
+      piffero: '$[?(@.type == "IssuesEvent")].id',
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: null,
+      sp: null,
+      jpp: '$[?(@.type == "IssuesEvent")].id',
+      runs: 2,
+    },
+    {
+      name: "13. Missing intermediate filter ($[?(@.payload.issue.number > 1000)].payload.issue.number)",
+      piffero: "$[?(@.payload.issue.number > 1000)].payload.issue.number",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: null,
+      sp: null,
+      jpp: null, // jsonpath-plus throws TypeError when payload.issue is undefined
+      runs: 2,
+    },
   ];
 
-  for (const c of cases) {
+  const filterArgIdx = process.argv.indexOf("--filter");
+  const filterRegex =
+    filterArgIdx !== -1 && process.argv[filterArgIdx + 1]
+      ? new RegExp(process.argv[filterArgIdx + 1], "i")
+      : null;
+  const activeCases = filterRegex
+    ? cases.filter((c) => filterRegex.test(c.name))
+    : cases;
+
+  for (const c of activeCases) {
     const rows = [];
     rows.push(await bench("Piffero (stream)", () => runPifferoStream(c.piffero), c.runs));
     rows.push(await bench("Piffero (string)", () => runPifferoString(c.piffero), c.runs));
