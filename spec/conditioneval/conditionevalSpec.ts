@@ -127,4 +127,64 @@ describe("ConditionEval", function () {
       expect(ConditionEval.evaluateFilter("@.arr[1.5]", data)).toBeFalse();
     });
   });
+
+  describe("Issue #21: Full JSONPath queries and root ($) references", function () {
+    it("detects root usage via ConditionEval.usesRoot", function () {
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.price > 10"))).toBeFalse();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@..price > 10"))).toBeFalse();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.tags[*]"))).toBeFalse();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.items[?(@.active)]"))).toBeFalse();
+
+      expect(ConditionEval.usesRoot(ConditionEval.compile("$.maxPrice"))).toBeTrue();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.price < $.config.maxPrice"))).toBeTrue();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.price < $..maxPrice"))).toBeTrue();
+      expect(ConditionEval.usesRoot(ConditionEval.compile("@.items[?(@.price < $.limit)]"))).toBeTrue();
+    });
+
+    it("evaluates descendant, wildcard, slice, union, and nested filter queries on @", function () {
+      const itemA = {
+        meta: { nested: { price: 25 } },
+        tags: ["core", "ts"],
+        nums: [5, 15, 25],
+        items: [{ active: true, score: 95 }],
+      };
+      const itemB = {
+        meta: { nested: { price: 5 } },
+        tags: [],
+        nums: [1, 2],
+        items: [{ active: false, score: 99 }],
+      };
+
+      expect(ConditionEval.evaluateFilter("@..price > 10", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@..price > 10", itemB)).toBeFalse();
+
+      expect(ConditionEval.evaluateFilter("@.tags[*]", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.tags[*]", itemB)).toBeFalse();
+      expect(ConditionEval.evaluateFilter("@.tags[*] == 'ts'", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.tags[*] == 'go'", itemA)).toBeFalse();
+
+      expect(ConditionEval.evaluateFilter("@.nums[1:3] == 15", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@['meta', 'tags'][*]", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.items[?(@.active == true && @.score > 90)]", itemA)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.items[?(@.active == true && @.score > 90)]", itemB)).toBeFalse();
+      // Per RFC 9535, @.active is an existence check (true even when active: false), false only when absent
+      expect(ConditionEval.evaluateFilter("@.items[?(@.active && @.score > 90)]", itemB)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.items[?(@.active && @.score > 90)]", { items: [{ score: 99 }] })).toBeFalse();
+    });
+
+    it("evaluates root ($) simple and complex queries", function () {
+      const root = { config: { maxPrice: 100, tiers: [10, 50, 200] }, tags: ["vip", "beta"] };
+      expect(ConditionEval.evaluateFilter("@.price < $.config.maxPrice", { price: 50 }, root)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.price < $.config.maxPrice", { price: 150 }, root)).toBeFalse();
+      expect(ConditionEval.evaluateFilter("@.price < $..maxPrice", { price: 50 }, root)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.tier == $.config.tiers[*]", { tier: 50 }, root)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("@.tier == $.config.tiers[*]", { tier: 99 }, root)).toBeFalse();
+      expect(ConditionEval.evaluateFilter("@.price < $.missing", { price: 50 }, root)).toBeFalse();
+    });
+
+    it("throws on malformed sub-queries inside filter expressions", function () {
+      expect(() => ConditionEval.compile("@.. > 10")).toThrow();
+      expect(() => ConditionEval.compile("@.a[ == 1")).toThrow();
+    });
+  });
 });

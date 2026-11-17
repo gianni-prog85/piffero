@@ -62,7 +62,7 @@ Ordine di implementazione consigliato (per dipendenze e impatto):
    - Sentinella singleton `NOTHING` a zero allocazioni, equality strutturale con fast-path primitivo e preservazione dell'early-skip di `PrunedJsBuilder`.
 5. [x] **#22 — Unioni eterogenee nei bracket e ordine/duplicati dei selettori** ([OpenSpec](./openspec/changes/rfc9535-heterogeneous-unions/proposal.md))
    - Step `union` ordinato con fast-path invariato per unioni omogenee semplici.
-6. [ ] **#21 — Query JSONPath complete nei filtri (`@`, `$`) e proiezione root** ([OpenSpec](./openspec/changes/rfc9535-filter-full-queries-root/proposal.md))
+6. [x] **#21 — Query JSONPath complete nei filtri (`@`, `$`) e proiezione root** ([OpenSpec](./openspec/changes/rfc9535-filter-full-queries-root/proposal.md))
    - Compilazione una-tantum delle sub-query e `rootProjection` potata in `StreamingPathEngine` per evitare il caricamento dell'intera root in RAM quando si usa `$...`.
 7. [ ] **#19 — Funzioni standard RFC 9535 (`length`, `count`, `match`, `search`, `value`)** ([OpenSpec](./openspec/changes/rfc9535-standard-functions/proposal.md))
    - Precompilazione I-Regexp a compile-time per `match`/`search`, fast-path ASCII O(1) per `length()` e tracciamento argomenti in `PrunedJsBuilder`.

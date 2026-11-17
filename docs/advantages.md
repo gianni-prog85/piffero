@@ -45,6 +45,7 @@ Most streaming JSONPath libraries only support static child paths, wildcards, or
 | **Type-safe ordered comparisons (`<`, `<=`, `>`, `>=`) & missing parents** | ✅ Compares only matching `number`/`string`; missing paths safely evaluate to `NOTHING` | ❌ N/A | ❌ Coerces types and throws `TypeError` on missing intermediates |
 | **Complete slices (`[start:end:step]`, negative step, `step = 0`)** | ✅ Official RFC 9535 `Bounds` algorithm | ❌ Unsupported (`throws`) | ✅ Supported (in-memory only) |
 | **Heterogeneous unions & order/duplicates** (`$[2, 0, 2]`, `$[0, 2:4, *]`, `$['b', 'a', 'b']`) | ✅ Mixed selectors, whitespace-safe, preserves selector order & duplicates | ❌ Key/index only, document order, no duplicates | ⚠️ Breaks with spaces (`$[2, 0, 2]`), drops key in key+filter union |
+| **Full queries in filters & root `$` refs** (`?(@..price > 10)`, `?(@.tags[*])`, `$.maxPrice`) | ✅ Precompiled sub-queries, pruned `$` projection, deferred candidate queue | ❌ Unsupported | ✅ Requires full JSON in RAM |
 | **Unicode `\uXXXX`, surrogates, I-JSON bounds, strict shorthand** | ✅ Compile-time validation and UTF-16 surrogate decoding | ⚠️ Partial (`sapientpro`/`json-web-streams` only escapes) | ❌ No `\uXXXX` decode in brackets or I-JSON range checks |
 
 ---

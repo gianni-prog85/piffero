@@ -887,4 +887,174 @@ describe("JSONPath complete features", function () {
       }
     });
   });
+
+  describe("Full JSONPath Queries in Filters & Root ($) References (Issue #21)", function () {
+    it("should support recursive descent inside filters $[?(@..price > 10)]", async function () {
+      const orders = [
+        { id: 1, details: { pricing: { price: 5 } } },
+        { id: 2, details: { pricing: { price: 25 } } },
+        { id: 3, details: [{ price: 8 }, { price: 15 }] },
+        { id: 4, details: { note: "no price" } },
+      ];
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(orders), "$[?(@..price > 10)].id"))
+      ).toEqual([2, 3]);
+    });
+
+    it("should support wildcards, slices, and unions inside filter expressions", async function () {
+      const docs = [
+        { name: "a", tags: ["ops", "dev"], scores: [1, 2, 3] },
+        { name: "b", tags: [], scores: [10, 20, 30] },
+        { name: "c", tags: ["qa"], scores: [5, 20, 7] },
+      ];
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(docs), "$[?(@.tags[*])].name"))
+      ).toEqual(["a", "c"]);
+
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(docs), "$[?(@.tags[*] == 'dev')].name"))
+      ).toEqual(["a"]);
+
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(docs), "$[?(@.scores[1:3] == 20)].name"))
+      ).toEqual(["b", "c"]);
+    });
+
+    it("should support nested filters inside filter sub-queries", async function () {
+      const teams = [
+        { team: "alpha", members: [{ name: "Ada", active: false }, { name: "Bob", active: true }] },
+        { team: "beta", members: [{ name: "Carl", active: false }] },
+        { team: "gamma", members: [{ name: "Dana", active: true }] },
+        { team: "delta", members: [{ name: "Eli" }] },
+      ];
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(teams), "$[?(@.members[?(@.active == true)])].team")
+        )
+      ).toEqual(["alpha", "gamma"]);
+
+      // Existence check matches present falsy values (`active: false`) but excludes `delta` (absent `active`)
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(teams), "$[?(@.members[?(@.active)])].team")
+        )
+      ).toEqual(["alpha", "beta", "gamma"]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(teams), "$[?@.members[?@.name == 'Ada']].team")
+        )
+      ).toEqual(["alpha"]);
+    });
+
+    it("should support root ($) references when property appears BEFORE filtered array", async function () {
+      const data = {
+        maxPrice: 50,
+        config: { minStock: 5 },
+        items: [
+          { name: "Pen", price: 10, stock: 10 },
+          { name: "Lamp", price: 45, stock: 2 },
+          { name: "Chair", price: 80, stock: 20 },
+        ],
+      };
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.items[?(@.price < $.maxPrice)].name")
+        )
+      ).toEqual(["Pen", "Lamp"]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(data),
+            "$.items[?(@.price < $.maxPrice && @.stock >= $.config.minStock)].name"
+          )
+        )
+      ).toEqual(["Pen"]);
+    });
+
+    it("should support root ($) references when property appears AFTER filtered array in stream", async function () {
+      const data = {
+        items: [
+          { id: 1, price: 12 },
+          { id: 2, price: 60 },
+          { id: 3, price: 29 },
+        ],
+        noise: { huge: "ignored-by-root-projection", arr: [1, 2, 3] },
+        config: { maxPrice: 30 },
+        maxPrice: 30,
+      };
+      const raw = JSON.stringify(data);
+      const chunked = Readable.from(raw.match(/.{1,7}/g) || [raw]);
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(chunked, "$.items[?(@.price < $.maxPrice)].id")
+        )
+      ).toEqual([1, 3]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(data),
+            "$.items[?(@.price < $.config.maxPrice)]"
+          )
+        )
+      ).toEqual([
+        { id: 1, price: 12 },
+        { id: 3, price: 29 },
+      ]);
+
+      // Complex root query $..maxPrice appearing after items
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.items[?(@.price < $..maxPrice)].id")
+        )
+      ).toEqual([1, 3]);
+
+      // Missing root field yields empty results safely
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.items[?(@.price < $.missingLimit)].id")
+        )
+      ).toEqual([]);
+    });
+
+    it("should support root ($) references on scalar arrays, unions, and root array indexing", async function () {
+      const scalarBefore = { limit: 15, values: [5, 20, 10, 30] };
+      const scalarAfter = { values: [5, 20, 10, 30], limit: 15 };
+
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(scalarBefore), "$.values[?(@ < $.limit)]"))
+      ).toEqual([5, 10]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(scalarAfter), "$.values[?(@ < $.limit)]"))
+      ).toEqual([5, 10]);
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(scalarAfter), "$.values[?(@ < $.limit), -1]")
+        )
+      ).toEqual([5, 10, 30]);
+
+      const rootArr = [{ limit: 25, price: 10 }, { limit: 5, price: 20 }, { limit: 5, price: 30 }];
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(rootArr), "$[?(@.price < $[0].limit)].price"))
+      ).toEqual([10, 20]);
+    });
+
+    it("should support root ($) reference inside dynamic script index", async function () {
+      const dataBefore = { idx: 1, items: ["first", "second", "third"] };
+      const dataAfter = { items: ["first", "second", "third"], idx: 1 };
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(dataBefore), "$.items[($.idx)]"))
+      ).toEqual(["second"]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(dataAfter), "$.items[($.idx)]"))
+      ).toEqual(["second"]);
+    });
+
+    it("should throw PifferoJsonPathError on invalid query syntax inside filter", function () {
+      expect(() => parse("$[?(@.. > 10)]")).toThrowError(PifferoJsonPathError);
+      expect(() => parse("$[?(@.tags[ == 'a')]")).toThrowError(PifferoJsonPathError);
+    });
+  });
 });

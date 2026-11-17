@@ -19,6 +19,7 @@ Side-by-side comparison across all 8 tested libraries (`Piffero`, `@sapientpro/j
 | **RFC 9535 Unicode escapes (`\uXXXX`, surrogates) & I-JSON / shorthand** | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ (no `\uXXXX` decode in `[]` / no bounds) |
 | **RFC 9535 filter semantics (`Nothing`, falsy existence, no-coercion `==`, type-safe `<`/`>`)** | ✅ | ❌ | ❌ (JS custom) | ❌ | ❌ | ❌ | ❌ | ❌ (JS truthiness & `==` coercion) |
 | **RFC 9535 heterogeneous unions & selector order/duplicates (`[2, 0, 2]`, `[0, 2:4, *]`)** | ✅ | Key/index only (no order/dups) | ❌ | Key/index only | Key/index only | ❌ | ❌ | Partial (no spaces, drops key+filter) |
+| **RFC 9535 full queries in filters (`@..prop`, `@.tags[*]`) & root `$` references** | ✅ (pruned `$` + deferred stream) | ❌ (throws) | ❌ (JS custom) | ❌ (throws) | ❌ (throws) | ❌ | ❌ | ✅ (requires full JSON in RAM) |
 | **Safe missing intermediate property access in filters** | ✅ | N/A | N/A | N/A | N/A | N/A | N/A | ❌ (throws `TypeError`) |
 | **Preserves JSON `null` values** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (skipped as EOF) | ✅ |
 | **Built-in TypeScript declarations** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (DefinitelyTyped) | ❌ | ✅ |
