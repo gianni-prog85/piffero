@@ -519,6 +519,12 @@ class ExprParser {
 
 export const NOTHING: unique symbol = Symbol("NOTHING");
 
+const hasOwn: (obj: any, key: PropertyKey) => boolean =
+  typeof (Object as any).hasOwn === "function"
+    ? (Object as any).hasOwn
+    : (obj: any, key: PropertyKey) =>
+        Object.prototype.hasOwnProperty.call(obj, key);
+
 export function rfc9535Equals(a: any, b: any): boolean {
   if (a === b) {
     return true;
@@ -551,10 +557,7 @@ export function rfc9535Equals(a: any, b: any): boolean {
   }
   for (let i = 0; i < keysA.length; i++) {
     const k = keysA[i];
-    if (
-      !Object.prototype.hasOwnProperty.call(b, k) ||
-      !rfc9535Equals(a[k], b[k])
-    ) {
+    if (!hasOwn(b, k) || !rfc9535Equals(a[k], b[k])) {
       return false;
     }
   }
@@ -624,17 +627,47 @@ export class ConditionEval {
       case "!==":
         return left !== right;
       case "==":
-        return rfc9535Equals(left, right);
+        return (
+          left === right ||
+          (left !== null &&
+            right !== null &&
+            typeof left === "object" &&
+            typeof right === "object" &&
+            rfc9535Equals(left, right))
+        );
       case "!=":
-        return !rfc9535Equals(left, right);
+        return !(
+          left === right ||
+          (left !== null &&
+            right !== null &&
+            typeof left === "object" &&
+            typeof right === "object" &&
+            rfc9535Equals(left, right))
+        );
       case "<":
         return rfc9535LessThan(left, right);
       case "<=":
-        return rfc9535LessThan(left, right) || rfc9535Equals(left, right);
+        return (
+          rfc9535LessThan(left, right) ||
+          left === right ||
+          (left !== null &&
+            right !== null &&
+            typeof left === "object" &&
+            typeof right === "object" &&
+            rfc9535Equals(left, right))
+        );
       case ">":
         return rfc9535LessThan(right, left);
       case ">=":
-        return rfc9535LessThan(right, left) || rfc9535Equals(left, right);
+        return (
+          rfc9535LessThan(right, left) ||
+          left === right ||
+          (left !== null &&
+            right !== null &&
+            typeof left === "object" &&
+            typeof right === "object" &&
+            rfc9535Equals(left, right))
+        );
     }
   }
 
@@ -660,26 +693,101 @@ export class ConditionEval {
         return val !== NOTHING && Boolean(val);
       }
       case "binary": {
+        const left =
+          node.left.type === "literal"
+            ? node.left.value
+            : node.left.type === "current"
+            ? currentValue === undefined
+              ? NOTHING
+              : currentValue
+            : this.evalAst(node.left, currentValue, rootValue);
+        const right =
+          node.right.type === "literal"
+            ? node.right.value
+            : node.right.type === "current"
+            ? currentValue === undefined
+              ? NOTHING
+              : currentValue
+            : this.evalAst(node.right, currentValue, rootValue);
         switch (node.op) {
           case "===":
+            return left === right;
           case "!==":
+            return left !== right;
           case "==":
+            return (
+              left === right ||
+              (left !== null &&
+                right !== null &&
+                typeof left === "object" &&
+                typeof right === "object" &&
+                rfc9535Equals(left, right))
+            );
           case "!=":
-          case ">":
-          case ">=":
+            return !(
+              left === right ||
+              (left !== null &&
+                right !== null &&
+                typeof left === "object" &&
+                typeof right === "object" &&
+                rfc9535Equals(left, right))
+            );
           case "<":
-          case "<=": {
-            const left = this.evalAst(node.left, currentValue, rootValue);
-            const right = this.evalAst(node.right, currentValue, rootValue);
-            return this.evalComparison(node.op, left, right);
-          }
+            return (typeof left === "number" && typeof right === "number") ||
+              (typeof left === "string" && typeof right === "string")
+              ? left < right
+              : false;
+          case "<=":
+            return (
+              ((typeof left === "number" && typeof right === "number") ||
+              (typeof left === "string" && typeof right === "string")
+                ? left < right
+                : false) ||
+              left === right ||
+              (left !== null &&
+                right !== null &&
+                typeof left === "object" &&
+                typeof right === "object" &&
+                rfc9535Equals(left, right))
+            );
+          case ">":
+            return (typeof left === "number" && typeof right === "number") ||
+              (typeof left === "string" && typeof right === "string")
+              ? left > right
+              : false;
+          case ">=":
+            return (
+              ((typeof left === "number" && typeof right === "number") ||
+              (typeof left === "string" && typeof right === "string")
+                ? left > right
+                : false) ||
+              left === right ||
+              (left !== null &&
+                right !== null &&
+                typeof left === "object" &&
+                typeof right === "object" &&
+                rfc9535Equals(left, right))
+            );
           default: {
             const val = this.evalAst(node, currentValue, rootValue);
             return val !== NOTHING && Boolean(val);
           }
         }
       }
-      case "member":
+      case "member": {
+        if (node.object.type === "current") {
+          if (currentValue === null || currentValue === undefined) {
+            return false;
+          }
+          if (typeof currentValue === "object") {
+            return Array.isArray(currentValue)
+              ? node.property === "length"
+              : hasOwn(currentValue, node.property);
+          }
+          return typeof currentValue === "string" && node.property === "length";
+        }
+        return this.evalAst(node, currentValue, rootValue) !== NOTHING;
+      }
       case "index":
       case "current":
       case "root":
@@ -702,36 +810,39 @@ export class ConditionEval {
       case "identifier":
         return NOTHING;
       case "member": {
-        const obj = this.evalAst(node.object, currentValue, rootValue);
-        if (obj === NOTHING || obj === null || obj === undefined) {
+        const obj =
+          node.object.type === "current"
+            ? currentValue
+            : node.object.type === "root"
+            ? rootValue
+            : this.evalAst(node.object, currentValue, rootValue);
+        if (obj === null || obj === undefined || obj === NOTHING) {
           return NOTHING;
         }
-        if (
-          (Array.isArray(obj) || typeof obj === "string") &&
-          node.property === "length"
-        ) {
-          return obj.length;
+        if (typeof obj === "object") {
+          if (Array.isArray(obj)) {
+            return node.property === "length" ? obj.length : NOTHING;
+          }
+          return hasOwn(obj, node.property) ? obj[node.property] : NOTHING;
         }
-        if (
-          typeof obj === "object" &&
-          !Array.isArray(obj) &&
-          Object.prototype.hasOwnProperty.call(obj, node.property)
-        ) {
-          return obj[node.property];
-        }
-        return NOTHING;
+        return typeof obj === "string" && node.property === "length"
+          ? obj.length
+          : NOTHING;
       }
       case "index": {
-        const obj = this.evalAst(node.object, currentValue, rootValue);
-        if (
-          obj === NOTHING ||
-          obj === null ||
-          obj === undefined ||
-          typeof obj !== "object"
-        ) {
+        const obj =
+          node.object.type === "current"
+            ? currentValue
+            : node.object.type === "root"
+            ? rootValue
+            : this.evalAst(node.object, currentValue, rootValue);
+        if (obj === null || obj === undefined || obj === NOTHING || typeof obj !== "object") {
           return NOTHING;
         }
-        const key = this.evalAst(node.index, currentValue, rootValue);
+        const key =
+          node.index.type === "literal"
+            ? node.index.value
+            : this.evalAst(node.index, currentValue, rootValue);
         if (key === NOTHING) {
           return NOTHING;
         }
@@ -743,9 +854,7 @@ export class ConditionEval {
           return idx >= 0 && idx < obj.length ? obj[idx] : NOTHING;
         }
         if (typeof key === "string") {
-          return Object.prototype.hasOwnProperty.call(obj, key)
-            ? obj[key]
-            : NOTHING;
+          return hasOwn(obj, key) ? obj[key] : NOTHING;
         }
         return NOTHING;
       }
@@ -771,8 +880,14 @@ export class ConditionEval {
           : this.evalAst(node.right, currentValue, rootValue);
       }
       case "binary": {
-        const left = this.evalAst(node.left, currentValue, rootValue);
-        const right = this.evalAst(node.right, currentValue, rootValue);
+        const left =
+          node.left.type === "literal"
+            ? node.left.value
+            : this.evalAst(node.left, currentValue, rootValue);
+        const right =
+          node.right.type === "literal"
+            ? node.right.value
+            : this.evalAst(node.right, currentValue, rootValue);
         switch (node.op) {
           case "===":
           case "!==":
