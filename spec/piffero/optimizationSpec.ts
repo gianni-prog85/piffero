@@ -170,7 +170,7 @@ describe("piffero optimizations", function () {
   });
 
   describe("PrunedJsBuilder filter projection edge cases", function () {
-    it("should handle truthiness on objects, arrays, and falsy scalars cleanly", async function () {
+    it("should handle existence tests and explicit equality on objects, arrays, and falsy scalars cleanly", async function () {
       const data = [
         { flag: { nested: "ignored", extra: [1, 2, 3] }, val: 1 },
         { flag: [1, 2], val: 2 },
@@ -180,17 +180,24 @@ describe("piffero optimizations", function () {
         { flag: "", val: 6 },
         { val: 7 },
       ];
-      const truthy = await Piffero.findAsPromise(
+      // RFC 9535 §2.3.5.2: existence test matches all nodes where property exists (even falsy/null)
+      const existsOut = await Piffero.findAsPromise(
         Readable.from([JSON.stringify(data)]),
         "$[?(@.flag)].val"
       );
-      expect(JSON.parse(truthy)).toEqual([1, 2]);
+      expect(JSON.parse(existsOut)).toEqual([1, 2, 3, 4, 5, 6]);
 
-      const falsy = await Piffero.findAsPromise(
+      const missingOut = await Piffero.findAsPromise(
         Readable.from([JSON.stringify(data)]),
         "$[?(!@.flag)].val"
       );
-      expect(JSON.parse(falsy)).toEqual([3, 4, 5, 6, 7]);
+      expect(JSON.parse(missingOut)).toEqual([7]);
+
+      const falseOut = await Piffero.findAsPromise(
+        Readable.from([JSON.stringify(data)]),
+        "$[?(@.flag == false)].val"
+      );
+      expect(JSON.parse(falseOut)).toEqual([4]);
     });
 
     it("should handle .length on arrays, strings, and objects in filter projections", async function () {

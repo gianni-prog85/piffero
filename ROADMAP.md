@@ -58,7 +58,7 @@ Ordine di implementazione consigliato (per dipendenze e impatto):
    - Algoritmo `Bounds` ufficiale, correzione di `end === 0`, fast-path O(1) preservato per `step > 0` e ring-buffer O(`k`) per tail reverse slice.
 3. [x] **#25 — Escape Unicode (`\uXXXX`, surrogate) e validazione I-JSON / `member-name-shorthand`** ([OpenSpec](./openspec/changes/rfc9535-lexical-escapes-validation/proposal.md))
    - Fast-path `indexOf("\\") === -1` e validazione esclusivamente a compile-time.
-4. [ ] **#24 — Semantica esistenza, confronti e `Nothing` nei filtri** ([OpenSpec](./openspec/changes/rfc9535-filter-semantics-nothing/proposal.md))
+4. [x] **#24 — Semantica esistenza, confronti e `Nothing` nei filtri** ([OpenSpec](./openspec/changes/rfc9535-filter-semantics-nothing/proposal.md))
    - Sentinella singleton `NOTHING` a zero allocazioni, equality strutturale con fast-path primitivo e preservazione dell'early-skip di `PrunedJsBuilder`.
 5. [ ] **#22 — Unioni eterogenee nei bracket e ordine/duplicati dei selettori** ([OpenSpec](./openspec/changes/rfc9535-heterogeneous-unions/proposal.md))
    - Step `union` ordinato con fast-path invariato per unioni omogenee semplici.
