@@ -60,7 +60,7 @@ Ordine di implementazione consigliato (per dipendenze e impatto):
    - Fast-path `indexOf("\\") === -1` e validazione esclusivamente a compile-time.
 4. [x] **#24 — Semantica esistenza, confronti e `Nothing` nei filtri** ([OpenSpec](./openspec/changes/rfc9535-filter-semantics-nothing/proposal.md))
    - Sentinella singleton `NOTHING` a zero allocazioni, equality strutturale con fast-path primitivo e preservazione dell'early-skip di `PrunedJsBuilder`.
-5. [ ] **#22 — Unioni eterogenee nei bracket e ordine/duplicati dei selettori** ([OpenSpec](./openspec/changes/rfc9535-heterogeneous-unions/proposal.md))
+5. [x] **#22 — Unioni eterogenee nei bracket e ordine/duplicati dei selettori** ([OpenSpec](./openspec/changes/rfc9535-heterogeneous-unions/proposal.md))
    - Step `union` ordinato con fast-path invariato per unioni omogenee semplici.
 6. [ ] **#21 — Query JSONPath complete nei filtri (`@`, `$`) e proiezione root** ([OpenSpec](./openspec/changes/rfc9535-filter-full-queries-root/proposal.md))
    - Compilazione una-tantum delle sub-query e `rootProjection` potata in `StreamingPathEngine` per evitare il caricamento dell'intera root in RAM quando si usa `$...`.
