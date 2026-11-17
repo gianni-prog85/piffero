@@ -13,7 +13,7 @@ Side-by-side comparison across all 8 tested libraries (`Piffero`, `@sapientpro/j
 | **Array index (`$[1]`)** | ✅ | ✅ | Manual (`pick`) | ❌ (throws) | ✅ | ✅ | ❌ | ✅ |
 | **Wildcard (`*`)** | ✅ | ✅ | Via RegExp | ✅ | ✅ | ✅ | Predicate fn only | ✅ |
 | **Recursive descent (`..`)** | ✅ | ✅ | Via RegExp | ❌ (throws) | ❌ (throws) | ✅ | Key-only (`'prop'`) | ✅ |
-| **Array slices (`[start:end:step]`), negative indexes, unions (`[,]`)** | ✅ | ❌ (throws) | ❌ | ❌ (throws) | ❌ (throws) | Partial | ❌ | ✅ |
+| **Array slices (`[start:end:step]`, negative/zero step, unions)** | ✅ (RFC 9535) | ❌ (throws) | ❌ | ❌ (`Unsupported node: SliceSelector`) | ❌ (throws) | Partial (no slices) | ❌ | ✅ (RFC 9535 slices) |
 | **Compound filters (`?()`) & script expressions (`()`)** | ✅ | ❌ (throws) | Custom JS filter | ❌ (throws) | ❌ (throws) | Duck-typing `{prop}` only | Predicate fn only | ✅ |
 | **Safe missing intermediate property access in filters** | ✅ | N/A | N/A | N/A | N/A | N/A | N/A | ❌ (throws `TypeError`) |
 | **Preserves JSON `null` values** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (skipped as EOF) | ✅ |

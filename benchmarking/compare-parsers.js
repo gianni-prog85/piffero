@@ -231,12 +231,38 @@ async function main() {
       abortOnFirst: false,
       runs: 2,
     },
+    {
+      name: "10. Array slice early-exit ($[0:10:2])",
+      piffero: "$[0:10:2]",
+      oboe: null,
+      streamparser: null,
+      jsonpathPlus: "$[0:10:2]",
+      abortOnFirst: false,
+      runs: 3,
+    },
+    {
+      name: "11. Reverse array slice ($[10:0:-1])",
+      piffero: "$[10:0:-1]",
+      oboe: null,
+      streamparser: null,
+      jsonpathPlus: "$[10:0:-1]",
+      abortOnFirst: false,
+      runs: 2,
+    },
   ];
 
   for (const c of cases) {
     const pStream = await bench("Piffero (stream)", () => runPifferoStream(c.piffero), c.runs);
     const pString = await bench("Piffero (string)", () => runPifferoString(c.piffero), c.runs);
-    const ob = await bench("Oboe", () => runOboe(c.oboe, c.abortOnFirst), c.runs);
+    const ob = c.oboe
+      ? await bench("Oboe", () => runOboe(c.oboe, c.abortOnFirst), c.runs)
+      : {
+          label: "Oboe",
+          avgMs: "N/A",
+          medianMs: "N/A",
+          opsSec: "N/A",
+          matches: "N/A (unsupported)",
+        };
     const sp = c.streamparser
       ? await bench("@streamparser/json", () => runStreamParser(c.streamparser, c.abortOnFirst), c.runs)
       : {

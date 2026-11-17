@@ -1,6 +1,6 @@
 # 200 MiB Scale Benchmark (`200.01 MiB` / `209.72 MB` JSON)
 
-Large-scale 8-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
+Large-scale 10-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
 
 ```bash
 npm run benchmark:200mb
@@ -18,10 +18,12 @@ npm run benchmark:200mb
 | **6. Nested wildcard** `$[*].payload.commits[*].author.email` (55,729) | 1498.37 ms | 1491.72 ms | 1788.61 ms | 1647.89 ms | 5463.27 ms | 3539.04 ms | 4248.27 ms | **1453.82 ms** |
 | **7. Recursive descent** `$..user.login` (23,715) | 2473.69 ms | 2496.88 ms | 3018.34 ms | N/A | 5425.97 ms | N/A | 4115.83 ms | **1635.88 ms** |
 | **8. Existence filter** `$[?(@.payload.issue)].payload.issue.number` (7,725) | 1599.74 ms | **1578.08 ms** | N/A | N/A | N/A | N/A | 4148.77 ms | **1406.57 ms** |
+| **9. Array slice early-exit** `$[0:10:2]` (5) | 2.48 ms | **1.24 ms** | N/A | N/A | N/A | N/A | N/A | 2104.39 ms |
+| **10. Reverse slice** `$[10:0:-1]` (10) | 1077.44 ms | **1054.89 ms** | N/A | N/A | N/A | N/A | N/A | 1840.44 ms |
 
 ## Key Takeaways
 
-- **#1 overall on every point lookup**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.44 ms** vs `3237.53 ms`, **~7,358x**), mid-file (**590.01 ms** vs `2013.73 ms`, **~3.4x**), and end-of-file (**1007.26 ms** vs `2036.98 ms`, **~2.0x**; and ahead of `@sapientpro/json-stream` at `1116.58 ms`).
+- **#1 overall on every point lookup and slice**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.44 ms** vs `3237.53 ms`, **~7,358x**), mid-file (**590.01 ms** vs `2013.73 ms`, **~3.4x**), end-of-file (**1007.26 ms** vs `2036.98 ms`, **~2.0x**; and ahead of `@sapientpro/json-stream` at `1116.58 ms`), forward slice `$[0:10:2]` (**1.24 ms** vs `2104.39 ms`, **~1,697x**), and reverse slice `$[10:0:-1]` (**1054.89 ms** vs `1840.44 ms`, **~1.7x**; all other streaming parsers lack RFC 9535 slice support).
 - **#1 streaming parser on nested wildcards, recursive descent, and filters**:
   - `$[*].payload.commits[*].author.email`: **1491.72 ms** (faster than `json-web-streams` `1647.89 ms`, `@sapientpro/json-stream` `1788.61 ms`, `@streamparser/json` `3539.04 ms`, `Oboe` `4248.27 ms`, and `stream-json` `5463.27 ms`).
   - `$..user.login`: **2473.69 ms** (faster than `@sapientpro/json-stream` `3018.34 ms`, `Oboe` `4115.83 ms`, and `stream-json` `5425.97 ms`).

@@ -20,6 +20,9 @@ describe("Piffero vs jsonpath-plus parity", function () {
     { name: "array slice ($[2].tags[1:3])", file: "spec/jsonFiles/large.json", path: "$[2].tags[1:3]" },
     { name: "array slice with step ($[2].tags[0:5:2])", file: "spec/jsonFiles/large.json", path: "$[2].tags[0:5:2]" },
     { name: "negative slice ($[2].tags[-2:])", file: "spec/jsonFiles/large.json", path: "$[2].tags[-2:]" },
+    { name: "open-ended slice with step ($[2].tags[1::3])", file: "spec/jsonFiles/large.json", path: "$[2].tags[1::3]" },
+    { name: "reverse slice ($[2].tags[::-1])", file: "spec/jsonFiles/large.json", path: "$[2].tags[::-1]" },
+    { name: "zero-end slice ($[2].tags[1:0:3])", file: "spec/jsonFiles/large.json", path: "$[2].tags[1:0:3]" },
     { name: "script expression ($[2].tags[(@.length-1)])", file: "spec/jsonFiles/large.json", path: "$[2].tags[(@.length-1)]" },
     { name: "index union ($[2].tags[1,4])", file: "spec/jsonFiles/large.json", path: "$[2].tags[1,4]" },
   ];
@@ -79,5 +82,28 @@ describe("Piffero vs jsonpath-plus parity", function () {
     );
     expect(JSON.parse(pifferoRaw)).toEqual(["John"]);
     expect(() => JSONPath({ path, json: data })).toThrow();
+  });
+
+  it("matches jsonpath-plus across RFC 9535 slice edge cases", async function () {
+    const arr = ["a", "b", "c", "d", "e", "f", "g"];
+    const slicePaths = [
+      "$[1:3]",
+      "$[5:]",
+      "$[1:5:2]",
+      "$[5:1:-2]",
+      "$[::-1]",
+      "$[0:0]",
+      "$[1:5:0]",
+      "$[:-4:-1]",
+      "$[-3::-1]",
+      "$[5:0:-2]",
+    ];
+
+    const payload = JSON.stringify(arr);
+    for (const p of slicePaths) {
+      const pifferoRaw = await Piffero.findAsPromise(Readable.from([payload]), p);
+      const jpResults = JSONPath({ path: p, json: arr });
+      expect(JSON.parse(pifferoRaw)).toEqual(jpResults);
+    }
   });
 });
