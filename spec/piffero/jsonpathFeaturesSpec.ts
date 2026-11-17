@@ -703,4 +703,188 @@ describe("JSONPath complete features", function () {
       ).toEqual([2]);
     });
   });
+
+  describe("RFC 9535 Heterogeneous Unions, Order & Duplicates (Issue #22)", function () {
+    it("should preserve selector order and duplicates for integer index unions $[2, 0, 2]", async function () {
+      const arr = ["a", "b", "c", "d"];
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[2, 0, 2]"))).toEqual([
+        "c",
+        "a",
+        "c",
+      ]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(sampleEmployees), "$.employees[2, 0, 2].name")
+        )
+      ).toEqual(["Anna", "John", "Anna"]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(sampleEmployees.employees), "$[2, 0, 2].name")
+        )
+      ).toEqual(["Anna", "John", "Anna"]);
+
+      const objArr = [{ id: 0 }, { id: 1 }, { id: 2 }, { id: 3 }];
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(objArr), "$[0, 2]"))).toEqual([
+        { id: 0 },
+        { id: 2 },
+      ]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(objArr), "$[2, 0]"))).toEqual([
+        { id: 2 },
+        { id: 0 },
+      ]);
+    });
+
+    it("should preserve selector order and duplicates for member name unions $['b', 'a', 'b']", async function () {
+      const obj = { a: 1, b: 2, c: 3 };
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['b', 'a', 'b']"))
+      ).toEqual([2, 1, 2]);
+
+      // Distinct union keys must also emit in selector order, not document key order
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['c', 'a']"))
+      ).toEqual([3, 1]);
+
+      // Union keys with downstream projection
+      const nested = {
+        a: { v: "first" },
+        b: { v: "second" },
+      };
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(nested), "$['b', 'a', 'b'].v"))
+      ).toEqual(["second", "first", "second"]);
+    });
+
+    it("should support heterogeneous unions combining indexes, slices, and wildcards $[0, 2:4, *]", async function () {
+      const arr = [10, 20, 30, 40];
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[0, 2:4, *]"))
+      ).toEqual([10, 30, 40, 10, 20, 30, 40]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(sampleEmployees), "$.items[0, 2:4, *].id")
+        )
+      ).toEqual([1, 3, 4, 1, 2, 3, 4]);
+    });
+
+    it("should support mixed key and filter selectors $['name', ?(@.active)] on objects and arrays", async function () {
+      const mixedObj = {
+        name: "Acme",
+        lead: { active: true, id: 1 },
+        intern: { active: false, id: 2 },
+        other: "ignored",
+      };
+      // ?(@.active == true) selects only active === true
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(mixedObj), "$['name', ?(@.active == true)]")
+        )
+      ).toEqual(["Acme", { active: true, id: 1 }]);
+
+      // RFC 9535 existence test ?(@.active) matches present falsy `active: false` too
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(mixedObj), "$['name', ?(@.active)]"))
+      ).toEqual(["Acme", { active: true, id: 1 }, { active: false, id: 2 }]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(sampleEmployees),
+            "$.employees[?(@.active == true), 1].name"
+          )
+        )
+      ).toEqual(["John", "Anna", "Joe"]);
+    });
+
+    it("should support negative indices, reverse slices, script expressions, and parenless filters inside unions", async function () {
+      const arr = [10, 20, 30, 40, 50];
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[1:3, -1, (0+0)]"))
+      ).toEqual([20, 30, 50, 10]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(sampleEmployees.items), "$[?@.price > 100, 0:2].name")
+        )
+      ).toEqual(["Laptop", "Desk", "Pen", "Book"]);
+
+      // Nested brackets and commas inside quotes must not split union selectors
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(sampleEmployees.employees),
+            "$[?(@.tags[0] === 'lead' || @.name === 'a,b'), 0].name"
+          )
+        )
+      ).toEqual(["Anna", "John"]);
+    });
+
+    it("should support unions after filters and with recursive descent", async function () {
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(sampleEmployees.employees),
+            "$[?(@.active == true)]['surname', 'name']"
+          )
+        )
+      ).toEqual(["Doe", "John", "Verdi", "Anna"]);
+
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(sampleEmployees.employees),
+            "$[?(@.active == true)].tags[1, 0]"
+          )
+        )
+      ).toEqual(["ts", "dev", "arch", "lead"]);
+
+      const tree = { a: { b: 1, a: 2 }, b: 3 };
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(tree), "$..['b', 'a', 'b']"))
+      ).toEqual([3, { b: 1, a: 2 }, 3, 1, 2, 1]);
+    });
+
+    it("should stop reading source stream early for bounded heterogeneous root unions", async function () {
+      let chunksRead = 0;
+      const total = 500;
+      const source = new Readable({
+        read() {
+          if (chunksRead === 0) {
+            chunksRead++;
+            this.push("[");
+          } else if (chunksRead <= total) {
+            const idx = chunksRead - 1;
+            const prefix = idx === 0 ? "" : ",";
+            chunksRead++;
+            this.push(`${prefix}${idx}`);
+          } else {
+            this.push("]");
+            this.push(null);
+          }
+        },
+      });
+
+      const out = await Piffero.findAsPromise(source, "$[2, 0, 2]");
+      expect(JSON.parse(out)).toEqual([2, 0, 2]);
+      expect(chunksRead).toBeLessThan(20);
+    });
+
+    it("should reject malformed union syntax", function () {
+      const invalidPaths = [
+        "$[]",
+        "$[   ]",
+        "$[, 1]",
+        "$[1, ]",
+        "$[1, , 2]",
+        "$['unclosed, 1]",
+        "$[?(1, 2]",
+      ];
+      for (const p of invalidPaths) {
+        expect(() => parse(p)).toThrowError(PifferoJsonPathError);
+      }
+    });
+  });
 });

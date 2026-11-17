@@ -72,15 +72,18 @@ function runSapientPro(jsonPath, earlyStop = false) {
     const p = createParser();
     const s = fs.createReadStream(OUT_FILE);
 
-    p.onValue(jsonPath, () => {
-      count++;
-      if (earlyStop && !settled) {
-        settled = true;
-        s.destroy();
-        p.destroy();
-        resolve({ ms: performance.now() - start, count });
-      }
-    });
+    const paths = Array.isArray(jsonPath) ? jsonPath : [jsonPath];
+    for (const pathItem of paths) {
+      p.onValue(pathItem, () => {
+        count++;
+        if (earlyStop && !settled) {
+          settled = true;
+          s.destroy();
+          p.destroy();
+          resolve({ ms: performance.now() - start, count });
+        }
+      });
+    }
 
     const input = createDecodedInput(p);
     s.on("data", (chunk) => {
@@ -406,6 +409,28 @@ async function main() {
       oboe: null,
       sp: null,
       jpp: null, // jsonpath-plus throws TypeError when payload.issue is undefined
+      runs: 2,
+    },
+    {
+      name: "14. Heterogeneous union ($[2,0,2,1:3].id)",
+      piffero: "$[2,0,2,1:3].id",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: null,
+      sp: null,
+      jpp: "$[2,0,2,1:3].id",
+      runs: 3,
+    },
+    {
+      name: "15. Key union ($[*]['type','id'])",
+      piffero: "$[*]['type','id']",
+      sapient: { path: ["$[*].type", "$[*].id"], earlyStop: false },
+      sj: { filter: /^\d+\.(type|id)$/, useArray: false, once: false },
+      jws: null,
+      oboe: null,
+      sp: { paths: ["$.*.type", "$.*.id"], abort: false },
+      jpp: "$[*]['type','id']",
       runs: 2,
     },
   ];

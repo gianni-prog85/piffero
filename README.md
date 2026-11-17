@@ -14,29 +14,29 @@ Piffero can process JSON files larger than available RAM and return the matched 
 ## Why Piffero?
 
 - **Zero runtime dependencies**: Lightweight and self-contained (`dependencies: {}`), with bundled TypeScript declarations (`.d.ts`).
-- **Larger-than-RAM streaming**: Parses Node.js `Readable` streams token-by-token without loading the full JSON document or allocating JavaScript objects for unmatched branches.
-- **Automatic early stream termination**: Destroys the upstream stream immediately once deterministic queries (e.g., `$.[1].payload`, `$.items[0:3]`) complete—delivering up to **~12x–24x** faster early-file extraction than Oboe and up to **~3,376x–7,358x** faster than in-memory `jsonpath-plus`.
-- **Backpressure-aware JSON pass-through**: `Piffero.findByPath()` emits a chunked, backpressure-aware Node.js `Readable` stream containing a valid JSON array (`[...]`), ready to `.pipe(res)` directly over HTTP or into files without extra `JSON.stringify` overhead.
-- **Complete JSONPath syntax**: Supports recursive descent (`..`), wildcards (`*`), array slices (`[start:end:step]`, negative indexes), unions (`[,]`), compound filter expressions (`?()` with `&&`, `||`, `!`, comparisons, existence checks), and script expressions (`(@.length-1)`)—capabilities missing from basic path-prefix parsers like `@streamparser/json`.
-- **Flexible APIs**: Use `findByPath` (Stream), `findAsString` (callback), or `findAsPromise` (`async`/`await`) with clear separation between invalid JSONPath errors (`PifferoJsonPathError`) and malformed JSON stream errors (`PifferoError`).
-- **Proven speed**: Outperforms `@sapientpro/json-stream`, `json-web-streams`, `Oboe`, `@streamparser/json`, `stream-json`, `bfj`, and in-memory `jsonpath-plus` across early-exit, point lookups, selective wildcards, and recursive descent over 200 MiB JSON payloads (see [PERFORMANCE](#performance)).
+- **Larger-than-RAM streaming**: Parses Node.js `Readable` streams token-by-token (`CStream` + `StreamingPathEngine`) without loading the full JSON document or allocating JavaScript objects for unmatched branches.
+- **Automatic early stream termination**: Destroys the upstream stream immediately once deterministic queries (`$.[1].payload`, `$[0:10:2]`, `$[2,0,2,1:3].id`) complete—delivering **~0.45–1.24 ms** extraction on 200 MiB payloads (up to **~1,697x–7,336x** faster than in-memory `jsonpath-plus` and **~12x–24x** faster than Oboe).
+- **Backpressure-aware JSON pass-through + `skipDecode` & `PrunedJsBuilder`**: `Piffero.findByPath()` emits a chunked, backpressure-aware Node.js `Readable` stream containing a valid JSON array (`[...]`) ready to `.pipe(res)` with zero stringify round-trips, bypasses UTF-8 decoding on skipped subtrees (`skipDecode`), and prunes unused properties when evaluating filters (`PrunedJsBuilder`).
+- **Full RFC 9535 JSONPath compliance on streams**: Supports recursive descent (`..`), wildcards (`*`), full RFC 9535 slices (negative bounds/steps & `step=0`), **heterogeneous bracket unions preserving selector order and duplicates** (`$[2, 0, 2]`, `$[0, 2:4, *]`, `$['b', 'a', 'b']`), both parenthesized `?()` and parenless `?` filters, singleton `NOTHING` & structural equality semantics (`false`/`0`/`""`/`null` existence, non-coercing `==`, type-safe `<`/`>`), `\uXXXX`/surrogate escapes, I-JSON bounds, and script expressions (`(@.length-1)`).
+- **Flexible APIs & fail-fast errors**: Use `findByPath` (Stream), `findAsString` (callback), or `findAsPromise` (`async`/`await`) with clear separation between synchronous syntax validation (`PifferoJsonPathError`) and malformed JSON stream errors (`PifferoError`).
+- **Proven speed**: Ranks #1 across early-file lookups, mid/end-of-file lookups, slices, heterogeneous unions, selective nested wildcards, recursive descent, and RFC 9535 filters over 200 MiB payloads against 7 libraries (see [PERFORMANCE](#performance) and [Full Advantages Guide](./docs/advantages.md)).
 
 # Description
 
-Piffero supports the JSONPath syntax described in [Stefan Goessner's post](http://goessner.net/articles/JsonPath/), including wildcards, recursive descent, slices, unions, compound filter expressions, and script expressions:
+Piffero supports both [Stefan Goessner's JSONPath](http://goessner.net/articles/JsonPath/) and the [RFC 9535](https://www.rfc-editor.org/info/rfc9535/) standard semantics on streaming JSON:
 
-JSONPath           | Description                                                          | Implemented
--------------------|----------------------------------------------------------------------|------------
-`$`                | The root object/element                                              | ✅
-`@`                | The current object/element (objects, nested properties, primitives)  | ✅
-`.`                | Child member operator                                                | ✅
-`..`               | Recursive descendant operator; JSONPath borrows this syntax from E4X | ✅
-`*`                | Wildcard matching all objects/elements regardless of their names     | ✅
-`[]`               | Subscript operator (indexes, quoted keys, negative indexes)          | ✅
-`[,]`              | Union operator for alternate names or array indices as a set         | ✅
-`[start:end:step]` | Array slice operator borrowed from ES4 / Python                      | ✅
-`?()`              | Filter expressions (`===`, `!==`, `==`, `!=`, `>`, `<`, `>=`, `<=`, `&&`, `||`, `!`, existence) | ✅
-`()`               | Script expressions (static arithmetic and `@.length` expressions)     | ✅
+JSONPath           | Description                                                                   | Implemented
+-------------------|-------------------------------------------------------------------------------|------------
+`$`                | The root object/element                                                       | ✅
+`@`                | The current object/element (objects, nested properties, primitives, `NOTHING`) | ✅
+`.`                | Child member operator (with RFC 9535 `member-name-shorthand` validation)       | ✅
+`..`               | Recursive descendant operator (depth-first pre-order)                          | ✅
+`*`                | Wildcard matching all objects/elements regardless of their names              | ✅
+`[]`               | Subscript operator (I-JSON indexes, `\uXXXX`/surrogate quoted keys, negatives) | ✅
+`[,]`              | Heterogeneous union operator preserving exact selector order and duplicates    | ✅
+`[start:end:step]` | RFC 9535 array slice operator (negative indices/step, `step = 0` empty result) | ✅
+`?()` / `?`        | RFC 9535 filter expressions (`===`, `!==`, `==`, `!=`, `>`, `<`, `>=`, `<=`, `&&`, `\|\|`, `!`, existence, structural equality) | ✅
+`()`               | Script expressions (static arithmetic and `@.length` expressions)              | ✅
 
 See the [replit.com demo](https://replit.com/@nigrosimone/Piffero#index.js).
 
@@ -44,14 +44,15 @@ See the [replit.com demo](https://replit.com/@nigrosimone/Piffero#index.js).
 
 | Feature | Examples | Notes |
 |---|---|---|
-| **Child & Bracket Keys** | `$.firstName`, `$['firstName']`, `$['name','surname']` | Supports nested objects and key unions |
-| **Array Indexing & Slices** | `$.employees[1]`, `$[0,2]`, `$[0:10:2]`, `$[-2:]` | O(1) index/slice evaluation on streaming fast path |
+| **Child & Escaped Bracket Keys** | `$.firstName`, `$['firstName']`, `$['\uD83D\uDE00']` | Decode of `\uXXXX` and UTF-16 surrogate pairs; fast-path when no escapes exist |
+| **Heterogeneous & Ordered Unions (`[,]`)** | `$[2, 0, 2]`, `$['b', 'a', 'b']`, `$[0, 2:4, *]`, `$['name', ?@.active]` | Preserves exact selector order and duplicates; zero-overhead fast-path on sorted distinct indexes |
+| **RFC 9535 Array Indexing & Slices** | `$.employees[1]`, `$[0:10:2]`, `$[10:0:-1]`, `$[-2:]` | O(1) evaluation on forward queries + O(*k*) ring buffer for reverse/tail slices |
 | **Wildcard (`*`)** | `$.*`, `$.employees[*].name`, `$.employees[*].phoneNumbers[*].number` | Matches all properties of objects or all elements of arrays |
-| **Recursive Descent (`..`)** | `$..number`, `$.employees..type`, `$..phoneNumbers[0]` | Depth-first pre-order traversal across arbitrary nesting |
-| **Current Element (`@`) & Filters (`?()`)** | `$.scores[?(@ > 10)]`, `$.users[?(@.address.city==='Rome')].name`, `$.items[?(@.price >= 10 && @.inStock)]`, `$.books[?(@.isbn)]` | Safe nested property traversal, boolean logic (`&&`, `\|\|`, `!`), arithmetic, and existence checks |
-| **Script Expressions (`()`)** | `$.employees[(1+1)]`, `$.employees[(@.length-1)].name` | Static index calculation and O(`k`) tail-buffered `@.length - k` evaluation |
+| **Recursive Descent (`..`)** | `$..number`, `$.employees..type`, `$..['b', 'a', 'b']` | Depth-first pre-order traversal across arbitrary nesting |
+| **RFC 9535 Filters (`?` / `?()`)** | `$[?@.v]`, `$[?@.a == @.b]`, `$[?@.price >= 10 && @.inStock]`, `$.scores[?(@ > 10)]` | Parenless `?[...]` & `?([...])`, falsy-safe existence, strict `==` + deep structural equality, `NOTHING`-safe comparisons, `PrunedJsBuilder` field pruning |
+| **Script Expressions (`()`)** | `$.employees[(1+1)]`, `$.employees[(@.length-1)].name` | Static index calculation and O(*k*) tail-buffered `@.length - k` evaluation |
 
-> **Output format:** Piffero always produces a valid JSON array (`[...]`) containing all matched elements in document order, whether consumed as a stream, callback string, or Promise.
+> **Output format:** Piffero always produces a valid JSON array (`[...]`) whether consumed as a stream, callback string, or Promise—preserving document order for wildcards/filters/slices (reversed on negative-step slices) and exact **selector order (including duplicates)** inside union brackets `[,]` per RFC 9535.
 
 # Get Started
 
@@ -176,6 +177,20 @@ await Piffero.findAsPromise(
 );
 // => ["Doe"]
 
+// RFC 9535 parenless filter (existence check & strict == without coercion)
+await Piffero.findAsPromise(
+  fs.createReadStream('./employees.json'),
+  '$.employees[?@.address.city == "Milan"].name'
+);
+// => ["Joe"]
+
+// Ordered heterogeneous union (preserves selector order & duplicates)
+await Piffero.findAsPromise(
+  fs.createReadStream('./employees.json'),
+  "$.employees[1, 0, 1]['surname', 'name']"
+);
+// => ["Black","Joe","Doe","John","Black","Joe"]
+
 // Script expression with @.length: get the last employee's name
 await Piffero.findAsPromise(fs.createReadStream('./employees.json'), '$.employees[(@.length-1)].name');
 // => ["Joe"]
@@ -210,12 +225,13 @@ All benchmark suites automatically generate and cache a **200 MiB** (`200.01 MiB
 
 ```bash
 npm run build                    # Compile TypeScript to ./dist
-npm test                         # Run Jasmine test suite
+npm test                         # Run Jasmine test suite (168 specs)
 npm run benchmark                # Benchmark.Suite on 200 MiB JSON (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
 npm run benchmark:compare        # 9-scenario 200 MiB comparison (Piffero vs Oboe vs @streamparser/json vs jsonpath-plus)
 npm run benchmark:streaming      # 7-scenario 200 MiB comparison (Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams)
 npm run benchmark:bfj            # 5-scenario 200 MiB comparison (Piffero vs bfj)
-npm run benchmark:200mb          # 8-scenario 200 MiB scale comparison across all 7 libraries
+npm run benchmark:200mb          # 15-scenario 200 MiB scale comparison across all 7 libraries
+npm run benchmark:filters        # ConditionEval RFC 9535 filter microbenchmark (200k ops/case)
 ```
 
 ## PERFORMANCE
@@ -226,20 +242,23 @@ Benchmarks run on the **200 MiB** GitHub events dataset (`200.01 MiB` / `209.72 
 
 | Workload | Best Piffero | Key Comparison |
 |---|---|---|
-| **Early-exit index (`$.[1].payload`)** | **0.44–0.98 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`0.77–1.02 ms`), `@streamparser/json` (`0.93–10.24 ms`), **~7.9x** faster than `bfj` (`4.36 ms`), **~7x–10x** faster than `stream-json` (`3.05–5.18 ms`), **~12x–24x** faster than `Oboe` (`10.51–11.94 ms`), **~3,376x–7,358x** faster than in-memory `jsonpath-plus` (`3237.53–3308.25 ms`); `json-web-streams` unsupported |
-| **Mid-file lookup (`$.[31341].payload`)** | **582.10–626.82 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`624.34–653.92 ms`), **~2.6x–3.4x** faster than `jsonpath-plus` (`1568.75–2013.73 ms`), **~2.9x** faster than `@streamparser/json` (`1712.21–1751.00 ms`), **~3.8x** faster than `stream-json` (`2240.51–2353.51 ms`), **~5.2x–5.4x** faster than `Oboe` (`3095.61–3240.89 ms`), **~52.8x** faster than `bfj` (`30,760.45 ms`) |
-| **End-of-file lookup (`$.[56754]...received_events_url`)** | **1007.26–1118.06 ms** (`string`) | Fastest overall: ahead of `@sapientpro/json-stream` (`1116.58 ms`), **~1.8x–2.0x** faster than `jsonpath-plus` (`1973.14–2036.98 ms`), **~2.8x–3.1x** faster than `@streamparser/json` (`3103.23–3182.61 ms`), **~3.8x–4.0x** faster than `stream-json` / `Oboe` (`3972.58–4302.49 ms`) |
-| **Selective wildcards (`$[*].actor.login`, `$[*].payload.commits[*].author.email`)** | **1320.95–1424.71 ms** / **1491.72–1603.60 ms** | Fastest streaming parser on nested wildcards (`1491.72–1603.60 ms`): ahead of `json-web-streams` (`1647.89–1778.87 ms`), `@sapientpro/json-stream` (`1766.77–1788.61 ms`), `@streamparser/json` (`3539.04–3780.32 ms`), `Oboe` (`4248.27–4580.17 ms`), and `stream-json` (`5397.23–5463.27 ms`), while beating `jsonpath-plus` (`1571.89` / `1937.37 ms`) with bounded RAM |
-| **Recursive descent (`$..user.login`, `$..login`)** | **2452.23–2702.94 ms** (`$..user.login`) | Fastest streaming parser overall: faster than `@sapientpro/json-stream` (`3009.94–3018.34 ms`), `Oboe` (`4115.83–4461.52 ms`), `stream-json` (`5362.21–5425.97 ms`), and **~22.8x** faster than `bfj` (`2591.42 ms` vs `59,125.34 ms` on `$..login`); `@streamparser/json` and `json-web-streams` unsupported |
-| **Filters (`?()`), slices (`[start:end]`), unions, negative indexes** | **1578.08–1678.32 ms** (filters) | **Only streaming library with native full JSONPath support** (**~2.6x** faster than `Oboe` duck-typing at `4148.77–4369.64 ms`, with all other streaming parsers unsupported); tracks `jsonpath-plus` (`1406.57–1594.54 ms` in-memory) with bounded RAM |
+| **Early-exit index (`$.[1].payload`)** | **0.45 ms** (`string`) | **#1 overall**: ahead of `@sapientpro/json-stream` (`0.73 ms`), `@streamparser/json` (`1.09 ms`), **~7.9x** vs `bfj` (`4.36 ms`), **~10x** vs `stream-json` (`4.48 ms`), **~21x** vs `Oboe` (`9.48 ms`), **~7,336x** vs `jsonpath-plus` (`3301.31 ms`); `json-web-streams` unsupported |
+| **Mid / End-of-file lookup (`$.[31341]` / `$.[56754]`)** | **601.17 ms** / **1052.55 ms** (`string`) | **#1 overall**: ahead of `@sapientpro/json-stream` (`626.28` / `1121.61 ms`), `jsonpath-plus` (`2061.89` / `1765.17 ms`), `@streamparser/json` (`1711.00` / `3171.93 ms`), `stream-json` (`2214.46` / `4103.15 ms`), `Oboe` (`3230.70` / `4118.41 ms`), and **~52.8x** vs `bfj` |
+| **Slices (`$[0:10:2]`, `$[10:0:-1]`)** | **1.24 ms** / **1054.89 ms** | **#1 overall & only streaming parser** with RFC 9535 slices: **~1,697x** faster on `$[0:10:2]` and **~1.7x** faster on reverse slices than `jsonpath-plus` (`2104.39` / `1840.44 ms`) |
+| **Heterogeneous union (`$[2,0,2,1:3].id`)** | **0.48 ms** (`string`) | **#1 overall & only streaming parser** supporting mixed reordered unions + duplicates (**~3,088x** faster than `jsonpath-plus` at `1482.23 ms`) |
+| **Key union (`$[*]['type','id']`, 125k matches)** | **1374.04 ms** (`string`) | **Only streaming parser preserving RFC 9535 selector order** (`type` before `id`); **~1.57x** faster than `jsonpath-plus` (`2153.09 ms`), **~2.59x** vs `@streamparser/json` (`3562.81 ms`), **~4.17x** vs `stream-json` (`5724.10 ms`) |
+| **Selective nested wildcards (`$[*].payload.commits[*].author.email`)** | **1611.00 ms** (`stream`) | **#1 overall**: ahead of `json-web-streams` (`1669.64 ms`), `jsonpath-plus` (`1735.45 ms`), `@sapientpro/json-stream` (`1911.17 ms`), `@streamparser/json` (`3756.11 ms`), `Oboe` (`4499.91 ms`), and `stream-json` (`5619.68 ms`) |
+| **Recursive descent (`$..user.login`)** | **2602.03 ms** (`string`) | **Fastest streaming parser**: faster than `@sapientpro/json-stream` (`3138.20 ms`), `Oboe` (`4518.88 ms`), `stream-json` (`5488.51 ms`), and **~22.8x** vs `bfj` (`$..login`); `@streamparser/json` & `json-web-streams` unsupported |
+| **RFC 9535 filters (`?[...]`, `==`, `NOTHING`-safe `>`)** | **1460.66–1610.40 ms** | **Only streaming library with full RFC 9535 filters**: **~1.28x** faster than `jsonpath-plus` on `$[?(@.type == "IssuesEvent")].id` (`1460.66 ms` vs `1866.99 ms`), **~2.8x** faster than `Oboe` on `?[?@.payload.issue]`, and safely handles missing paths where `jsonpath-plus` throws `TypeError` |
 
-### Full Reports & Detailed Matrices
+### Full Reports & Documentation
 
-- [200 MiB Scale Comparison (7 Libraries)](./docs/benchmarks/scale-200mb.md)
+- [Why Choose Piffero: Architecture, RFC 9535 & Performance Advantages](./docs/advantages.md)
+- [200 MiB Scale Comparison (15 Scenarios across 7 Libraries)](./docs/benchmarks/scale-200mb.md)
+- [Full 8-Library Feature & JSONPath Compatibility Matrix](./docs/benchmarks/feature-matrix.md)
 - [Streaming Parsers Comparison (`@sapientpro/json-stream`, `stream-json`, `json-web-streams`)](./docs/benchmarks/streaming-parsers.md)
 - [Extended 9-Scenario Comparison (`Oboe`, `@streamparser/json`, `jsonpath-plus`)](./docs/benchmarks/general-comparison.md)
 - [`Piffero vs bfj` Comparison](./docs/benchmarks/bfj-comparison.md)
-- [Full 8-Library Feature & JSONPath Matrix](./docs/benchmarks/feature-matrix.md)
 
 ## Other tools
 * Piffero is built on [Clarinet](https://github.com/dscape/clarinet)

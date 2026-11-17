@@ -10,7 +10,7 @@ export type JsonPathStep =
   | { kind: "wildcard"; recursive?: boolean }
   | { kind: "index"; indexes: Set<number>; rawIndexes: number[]; recursive?: boolean }
   | { kind: "slice"; start?: number; end?: number; step: number; recursive?: boolean }
-  | { kind: "unionKeys"; keys: Set<string>; recursive?: boolean }
+  | { kind: "unionKeys"; keys: Set<string>; orderedKeys: string[]; recursive?: boolean }
   | { kind: "filter"; expr: string; ast: ExprNode; recursive?: boolean }
   | {
       kind: "script";
@@ -19,7 +19,8 @@ export type JsonPathStep =
       staticIndex?: number;
       lengthOffset?: number | null;
       recursive?: boolean;
-    };
+    }
+  | { kind: "union"; selectors: JsonPathStep[]; recursive?: boolean };
 
 export interface LegacyCondition {
   key: string;
@@ -112,15 +113,22 @@ function findMatchingBracket(
   return -1;
 }
 
-function splitOutsideQuotes(str: string, delimiter: string): string[] {
+function splitOutsideQuotes(
+  str: string,
+  delimiter: string,
+  fullPath?: string
+): string[] {
   const parts: string[] = [];
   let start = 0;
   let i = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
   while (i < str.length) {
     const ch = str[i];
     if (ch === '"' || ch === "'" || ch === "`") {
       const quote = ch;
       i++;
+      let closed = false;
       while (i < str.length) {
         if (str[i] === "\\") {
           i += 2;
@@ -128,17 +136,38 @@ function splitOutsideQuotes(str: string, delimiter: string): string[] {
         }
         if (str[i] === quote) {
           i++;
+          closed = true;
           break;
         }
         i++;
       }
+      if (!closed && fullPath !== undefined) {
+        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+      }
       continue;
     }
-    if (ch === delimiter) {
+    if (ch === "(") {
+      parenDepth++;
+    } else if (ch === ")") {
+      parenDepth--;
+      if (parenDepth < 0 && fullPath !== undefined) {
+        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+      }
+    } else if (ch === "[") {
+      bracketDepth++;
+    } else if (ch === "]") {
+      bracketDepth--;
+      if (bracketDepth < 0 && fullPath !== undefined) {
+        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+      }
+    } else if (ch === delimiter && parenDepth === 0 && bracketDepth === 0) {
       parts.push(str.slice(start, i));
       start = i + 1;
     }
     i++;
+  }
+  if ((parenDepth !== 0 || bracketDepth !== 0) && fullPath !== undefined) {
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
   }
   parts.push(str.slice(start));
   return parts;
@@ -175,22 +204,22 @@ function tryUnquoteString(raw: string, fullPath: string): string | null {
   }
 }
 
-function parseBracketSubscript(
-  inner: string,
+function parseSingleSelector(
+  sel: string,
   recursive: boolean,
   fullPath: string
 ): JsonPathStep {
-  if (inner.length === 0) {
+  if (sel.length === 0) {
     throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
   }
 
-  if (inner === "*") {
+  if (sel === "*") {
     return { kind: "wildcard", recursive };
   }
 
   // Filter expression: ?expr or ?(expr) (RFC 9535 §2.3.5)
-  if (inner.startsWith("?")) {
-    let expr = inner.slice(1).trim();
+  if (sel.startsWith("?")) {
+    let expr = sel.slice(1).trim();
     if (!expr) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
     }
@@ -212,12 +241,12 @@ function parseBracketSubscript(
   }
 
   // Script expression: (...)
-  if (inner.startsWith("(")) {
-    const closeParen = findMatchingBracket(inner, 0, "(", ")");
-    if (closeParen !== inner.length - 1) {
+  if (sel.startsWith("(")) {
+    const closeParen = findMatchingBracket(sel, 0, "(", ")");
+    if (closeParen !== sel.length - 1) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
     }
-    const expr = inner.slice(1, -1).trim();
+    const expr = sel.slice(1, -1).trim();
     if (!expr) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
     }
@@ -244,18 +273,17 @@ function parseBracketSubscript(
     }
   }
 
-  // Quoted property name or union of quoted property names
-  const commaParts = splitOutsideQuotes(inner, ",");
-  if (commaParts.length > 0 && commaParts.every((p) => tryUnquoteString(p, fullPath) !== null)) {
-    const keys = commaParts.map((p) => tryUnquoteString(p, fullPath) as string);
-    if (keys.length === 1) {
-      return { kind: "child", key: keys[0], recursive };
+  // Quoted property name
+  if (sel[0] === "'" || sel[0] === '"') {
+    const unquoted = tryUnquoteString(sel, fullPath);
+    if (unquoted !== null) {
+      return { kind: "child", key: unquoted, recursive };
     }
-    return { kind: "unionKeys", keys: new Set(keys), recursive };
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
   }
 
   // Slice [start:end] or [start:end:step]
-  const colonParts = splitOutsideQuotes(inner, ":");
+  const colonParts = splitOutsideQuotes(sel, ":", fullPath);
   if (colonParts.length > 1) {
     if (colonParts.length > 3) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
@@ -268,18 +296,77 @@ function parseBracketSubscript(
     return { kind: "slice", start, end, step, recursive };
   }
 
-  // Numeric union [1,2,3] or single index [0]
-  if (commaParts.every((p) => /^-?\d+$/.test(p.trim()))) {
-    const nums = commaParts.map((p) => parseIJsonInt(p.trim(), fullPath));
+  // Single integer index
+  if (/^-?\d+$/.test(sel)) {
+    const num = parseIJsonInt(sel, fullPath);
     return {
       kind: "index",
-      indexes: new Set(nums),
-      rawIndexes: nums,
+      indexes: new Set([num]),
+      rawIndexes: [num],
       recursive,
     };
   }
 
   throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+}
+
+function parseBracketSubscript(
+  inner: string,
+  recursive: boolean,
+  fullPath: string
+): JsonPathStep {
+  if (inner.length === 0) {
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+  }
+
+  const commaParts = splitOutsideQuotes(inner, ",", fullPath);
+  if (commaParts.length === 1) {
+    return parseSingleSelector(commaParts[0].trim(), recursive, fullPath);
+  }
+
+  const selectors: JsonPathStep[] = [];
+  for (let i = 0; i < commaParts.length; i++) {
+    const trimmed = commaParts[i].trim();
+    if (trimmed.length === 0) {
+      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+    }
+    selectors.push(parseSingleSelector(trimmed, false, fullPath));
+  }
+
+  // Fast-path 1: Distinct string-key union
+  if (selectors.every((s) => s.kind === "child")) {
+    const orderedKeys = selectors.map(
+      (s) => (s as Extract<JsonPathStep, { kind: "child" }>).key
+    );
+    const keySet = new Set(orderedKeys);
+    if (keySet.size === orderedKeys.length) {
+      return { kind: "unionKeys", keys: keySet, orderedKeys, recursive };
+    }
+    return { kind: "union", selectors, recursive };
+  }
+
+  // Fast-path 2: Strictly increasing non-negative integer union (preserves streaming O(1) lookup)
+  if (selectors.every((s) => s.kind === "index")) {
+    const nums = selectors.map(
+      (s) => (s as Extract<JsonPathStep, { kind: "index" }>).rawIndexes[0]
+    );
+    let strictlyIncreasingNonNeg = nums[0] >= 0;
+    for (let i = 1; i < nums.length && strictlyIncreasingNonNeg; i++) {
+      if (nums[i] < 0 || nums[i] <= nums[i - 1]) {
+        strictlyIncreasingNonNeg = false;
+      }
+    }
+    if (strictlyIncreasingNonNeg) {
+      return {
+        kind: "index",
+        indexes: new Set(nums),
+        rawIndexes: nums,
+        recursive,
+      };
+    }
+  }
+
+  return { kind: "union", selectors, recursive };
 }
 
 export function tokenizeJsonPath(jsonPath: string): JsonPathStep[] {
@@ -399,7 +486,12 @@ export function buildLegacyAndDetermineEngine(
       needsStreamingEngine = true;
     }
 
-    if (step.kind === "wildcard" || step.kind === "script" || step.kind === "unionKeys") {
+    if (
+      step.kind === "wildcard" ||
+      step.kind === "script" ||
+      step.kind === "unionKeys" ||
+      step.kind === "union"
+    ) {
       needsStreamingEngine = true;
       const node: LegacyParsedPath = {
         value: step.kind === "wildcard" ? '"*"' : '""',
@@ -450,7 +542,11 @@ export function buildLegacyAndDetermineEngine(
     if (step.kind === "index") {
       const hasNegative = step.rawIndexes.some((n) => n < 0);
       const isMulti = step.rawIndexes.length > 1;
-      if (hasNegative || (isMulti && hasNext) || !canAttachToCurrent) {
+      if (
+        hasNegative ||
+        (isMulti && (hasNext || current.value === '"$"')) ||
+        !canAttachToCurrent
+      ) {
         needsStreamingEngine = true;
       }
       const range = {
@@ -631,11 +727,11 @@ function evaluateSingleStepOnValue(
     }
     case "unionKeys": {
       if (!Array.isArray(val)) {
-        const keys = Object.keys(val);
-        for (let i = 0; i < keys.length; i++) {
-          if (step.keys.has(keys[i])) {
+        for (let i = 0; i < step.orderedKeys.length; i++) {
+          const k = step.orderedKeys[i];
+          if (Object.prototype.hasOwnProperty.call(val, k)) {
             results.push(
-              ...evaluateStepsOnValue(val[keys[i]], steps, nextIndex, rootValue)
+              ...evaluateStepsOnValue(val[k], steps, nextIndex, rootValue)
             );
           }
         }
@@ -659,17 +755,12 @@ function evaluateSingleStepOnValue(
     }
     case "index": {
       if (Array.isArray(val)) {
-        const matched = new Set<number>();
-        for (const rawIdx of step.rawIndexes) {
+        for (let i = 0; i < step.rawIndexes.length; i++) {
+          const rawIdx = step.rawIndexes[i];
           const resolved = rawIdx < 0 ? val.length + rawIdx : rawIdx;
           if (resolved >= 0 && resolved < val.length) {
-            matched.add(resolved);
-          }
-        }
-        for (let i = 0; i < val.length; i++) {
-          if (matched.has(i)) {
             results.push(
-              ...evaluateStepsOnValue(val[i], steps, nextIndex, rootValue)
+              ...evaluateStepsOnValue(val[resolved], steps, nextIndex, rootValue)
             );
           }
         }
@@ -734,6 +825,20 @@ function evaluateSingleStepOnValue(
             ...evaluateStepsOnValue(val[computed], steps, nextIndex, rootValue)
           );
         }
+      }
+      break;
+    }
+    case "union": {
+      for (let i = 0; i < step.selectors.length; i++) {
+        results.push(
+          ...evaluateSingleStepOnValue(
+            val,
+            step.selectors[i],
+            steps,
+            nextIndex,
+            rootValue
+          )
+        );
       }
       break;
     }
@@ -1225,7 +1330,7 @@ class PrunedJsBuilder {
 interface PendingSlot {
   done: boolean;
   streaming: boolean;
-  results: string[];
+  results: Array<string | PendingSlot>;
 }
 
 interface ActiveCapture {
@@ -1254,19 +1359,65 @@ interface ActiveArrayCollector {
   currentElementCollector: JsonValueCollector | null;
 }
 
+interface ActiveBranch {
+  stepIdx: number;
+  targetSlot?: PendingSlot;
+}
+
+interface ActiveUnionGroup {
+  stepIdx: number;
+  step: Extract<JsonPathStep, { kind: "union" | "unionKeys" }>;
+  slots: PendingSlot[];
+  keyToSlot?: Map<string, PendingSlot>;
+}
+
 interface Frame {
   type: "object" | "array";
   depth: number;
-  activeSteps: number[];
+  activeBranches: ActiveBranch[];
   elementIndex: number;
-  pendingChildSteps: number[];
+  pendingChildBranches: ActiveBranch[];
   arrayCollectors: ActiveArrayCollector[];
+  unionGroups: ActiveUnionGroup[];
 }
 
-function pushUnique(arr: number[], val: number) {
-  if (arr.indexOf(val) === -1) {
-    arr.push(val);
+function pushUniqueBranch(
+  arr: ActiveBranch[],
+  stepIdx: number,
+  targetSlot?: PendingSlot
+) {
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i].stepIdx === stepIdx && arr[i].targetSlot === targetSlot) {
+      return;
+    }
   }
+  arr.push(targetSlot ? { stepIdx, targetSlot } : { stepIdx });
+}
+
+function getSelectorMaxPositiveIndex(step: JsonPathStep): number | null {
+  if (step.kind === "index" && !step.rawIndexes.some((n) => n < 0)) {
+    return Math.max(...step.rawIndexes);
+  }
+  if (step.kind === "slice" && step.step === 0) {
+    return -1;
+  }
+  if (
+    step.kind === "slice" &&
+    step.step > 0 &&
+    (step.start === undefined || step.start >= 0) &&
+    step.end !== undefined &&
+    step.end >= 0
+  ) {
+    return step.end - 1;
+  }
+  if (
+    step.kind === "script" &&
+    step.staticIndex !== undefined &&
+    step.staticIndex >= 0
+  ) {
+    return step.staticIndex;
+  }
+  return null;
 }
 
 export class StreamingPathEngine implements SaxHandler {
@@ -1276,9 +1427,12 @@ export class StreamingPathEngine implements SaxHandler {
   private activeFilters: ActiveFilter[] = [];
   private activeElCollectors: ActiveArrayCollector[] = [];
   private hasEmitted = false;
-  private rootPendingSteps: number[] = [];
+  private rootPendingBranches: ActiveBranch[] = [];
   private skipDepth = 0;
-  private filterProjections: Array<FilterProjectionNode | null> = [];
+  private filterProjectionMap = new Map<
+    Extract<JsonPathStep, { kind: "filter" }>,
+    FilterProjectionNode | null
+  >();
   private rootMaxIndex: number | null = null;
   private earlyExited = false;
 
@@ -1293,38 +1447,47 @@ export class StreamingPathEngine implements SaxHandler {
     private onEarlyExit?: () => void
   ) {
     if (steps.length > 0) {
-      this.rootPendingSteps = [0];
+      this.rootPendingBranches = [{ stepIdx: 0 }];
       const s0 = steps[0];
       if (!s0.recursive) {
-        if (s0.kind === "index" && !s0.rawIndexes.some((n) => n < 0)) {
-          this.rootMaxIndex = Math.max(...s0.rawIndexes);
-        } else if (s0.kind === "slice" && s0.step === 0) {
-          this.rootMaxIndex = -1;
-        } else if (
-          s0.kind === "slice" &&
-          s0.step > 0 &&
-          (s0.start === undefined || s0.start >= 0) &&
-          s0.end !== undefined &&
-          s0.end >= 0
-        ) {
-          this.rootMaxIndex = s0.end - 1;
-        } else if (
-          s0.kind === "script" &&
-          s0.staticIndex !== undefined &&
-          s0.staticIndex >= 0
-        ) {
-          this.rootMaxIndex = s0.staticIndex;
+        if (s0.kind === "union") {
+          let unionMax = -1;
+          let allBounded = true;
+          for (let i = 0; i < s0.selectors.length; i++) {
+            const selMax = getSelectorMaxPositiveIndex(s0.selectors[i]);
+            if (selMax === null) {
+              allBounded = false;
+              break;
+            }
+            if (selMax > unionMax) {
+              unionMax = selMax;
+            }
+          }
+          if (allBounded) {
+            this.rootMaxIndex = unionMax;
+          }
+        } else {
+          this.rootMaxIndex = getSelectorMaxPositiveIndex(s0);
         }
       }
       for (let i = 0; i < steps.length; i++) {
         const st = steps[i];
+        const remaining = steps.slice(i + 1);
         if (st.kind === "filter") {
-          this.filterProjections[i] = buildFilterProjection(
-            st.ast,
-            steps.slice(i + 1)
+          this.filterProjectionMap.set(
+            st,
+            buildFilterProjection(st.ast, remaining)
           );
-        } else {
-          this.filterProjections[i] = null;
+        } else if (st.kind === "union") {
+          for (let s = 0; s < st.selectors.length; s++) {
+            const sel = st.selectors[s];
+            if (sel.kind === "filter") {
+              this.filterProjectionMap.set(
+                sel,
+                buildFilterProjection(sel.ast, remaining)
+              );
+            }
+          }
         }
       }
     }
@@ -1355,6 +1518,15 @@ export class StreamingPathEngine implements SaxHandler {
     this.skipDecode = false;
   }
 
+  private finalizeUnionGroups(frame: Frame) {
+    for (let i = 0; i < frame.unionGroups.length; i++) {
+      const slots = frame.unionGroups[i].slots;
+      for (let j = 0; j < slots.length; j++) {
+        slots[j].done = true;
+      }
+    }
+  }
+
   private checkEarlyExit() {
     if (
       !this.earlyExited &&
@@ -1365,12 +1537,17 @@ export class StreamingPathEngine implements SaxHandler {
       this.frameStack[0].elementIndex >= this.rootMaxIndex &&
       this.activeCaptures.length === 0 &&
       this.activeFilters.length === 0 &&
-      this.activeElCollectors.length === 0 &&
-      this.pendingSlots.length === 0
+      this.activeElCollectors.length === 0
     ) {
-      this.earlyExited = true;
-      if (this.onEarlyExit) {
-        this.onEarlyExit();
+      if (this.frameStack[0].unionGroups.length > 0) {
+        this.finalizeUnionGroups(this.frameStack[0]);
+        this.flushPendingSlots();
+      }
+      if (this.pendingSlots.length === 0) {
+        this.earlyExited = true;
+        if (this.onEarlyExit) {
+          this.onEarlyExit();
+        }
       }
     }
   }
@@ -1384,30 +1561,57 @@ export class StreamingPathEngine implements SaxHandler {
     }
   }
 
-  private createSlot(streamingCandidate: boolean): PendingSlot {
-    const canStream = streamingCandidate && this.pendingSlots.length === 0;
+  private createSlot(
+    streamingCandidate: boolean,
+    targetSlot?: PendingSlot
+  ): PendingSlot {
+    const canStream =
+      !targetSlot && streamingCandidate && this.pendingSlots.length === 0;
     const slot: PendingSlot = {
       done: false,
       streaming: canStream,
       results: [],
     };
-    this.pendingSlots.push(slot);
+    if (targetSlot) {
+      targetSlot.results.push(slot);
+    } else {
+      this.pendingSlots.push(slot);
+    }
     return slot;
   }
 
-  private flushPendingSlots() {
-    while (this.pendingSlots.length > 0 && this.pendingSlots[0].done) {
-      const slot = this.pendingSlots.shift() as PendingSlot;
-      if (!slot.streaming) {
-        for (let i = 0; i < slot.results.length; i++) {
-          this.emitResultString(slot.results[i]);
+  private flushNestedItems(slot: PendingSlot) {
+    if (slot.streaming) {
+      return;
+    }
+    while (slot.results.length > 0) {
+      const item = slot.results[0];
+      if (typeof item === "string") {
+        slot.results.shift();
+        this.emitResultString(item);
+      } else {
+        this.flushNestedItems(item);
+        if (!item.done || item.results.length > 0) {
+          break;
         }
+        slot.results.shift();
       }
     }
   }
 
-  private startDirectCapture(): ActiveCapture {
-    const slot = this.createSlot(true);
+  private flushPendingSlots() {
+    while (this.pendingSlots.length > 0) {
+      const head = this.pendingSlots[0];
+      this.flushNestedItems(head);
+      if (!head.done || head.results.length > 0) {
+        break;
+      }
+      this.pendingSlots.shift();
+    }
+  }
+
+  private startDirectCapture(targetSlot?: PendingSlot): ActiveCapture {
+    const slot = this.createSlot(true, targetSlot);
     let startedComma = false;
     const collector = new JsonValueCollector(
       slot.streaming
@@ -1429,12 +1633,12 @@ export class StreamingPathEngine implements SaxHandler {
   }
 
   private startFilterCandidate(
-    stepIndex: number,
     step: Extract<JsonPathStep, { kind: "filter" }>,
-    nextStepIndex: number
+    nextStepIndex: number,
+    targetSlot?: PendingSlot
   ): ActiveFilter {
-    const slot = this.createSlot(false);
-    const proj = this.filterProjections[stepIndex];
+    const slot = this.createSlot(false, targetSlot);
+    const proj = this.filterProjectionMap.get(step) || null;
     const filter: ActiveFilter = {
       slot,
       collector: proj ? null : new JsonValueCollector(),
@@ -1494,10 +1698,23 @@ export class StreamingPathEngine implements SaxHandler {
     flt.slot.done = true;
   }
 
+  private selectorNeedsArrayCollector(step: JsonPathStep): boolean {
+    return (
+      (step.kind === "script" && step.staticIndex === undefined) ||
+      (step.kind === "index" && step.rawIndexes.some((n) => n < 0)) ||
+      (step.kind === "slice" &&
+        step.step !== 0 &&
+        (step.step < 0 ||
+          (step.start !== undefined && step.start < 0) ||
+          (step.end !== undefined && step.end < 0)))
+    );
+  }
+
   private createArrayCollectorForFrame(
     frame: Frame,
     stepIndex: number,
-    step: JsonPathStep
+    step: JsonPathStep,
+    slot: PendingSlot
   ) {
     let tailKeep: number | null = null;
     let maxCollectIndex: number | null = null;
@@ -1521,7 +1738,6 @@ export class StreamingPathEngine implements SaxHandler {
         maxCollectIndex = step.start;
       }
     }
-    const slot = this.createSlot(false);
     frame.arrayCollectors.push({
       slot,
       stepIndex,
@@ -1554,16 +1770,11 @@ export class StreamingPathEngine implements SaxHandler {
         matchedIndexes.push(idx);
       }
     } else if (ac.step.kind === "index") {
-      const targetSet = new Set<number>();
-      for (const rawIdx of ac.step.rawIndexes) {
+      for (let i = 0; i < ac.step.rawIndexes.length; i++) {
+        const rawIdx = ac.step.rawIndexes[i];
         const resolved = rawIdx < 0 ? length + rawIdx : rawIdx;
         if (resolved >= 0 && resolved < length) {
-          targetSet.add(resolved);
-        }
-      }
-      for (let i = 0; i < length; i++) {
-        if (targetSet.has(i)) {
-          matchedIndexes.push(i);
+          matchedIndexes.push(resolved);
         }
       }
     } else if (ac.step.kind === "slice" && ac.step.step !== 0) {
@@ -1624,41 +1835,117 @@ export class StreamingPathEngine implements SaxHandler {
     }
   }
 
+  private initFrame(frame: Frame) {
+    const branches = frame.activeBranches;
+    for (let i = 0; i < branches.length; i++) {
+      const { stepIdx, targetSlot } = branches[i];
+      const step = this.steps[stepIdx];
+      if (step.kind === "unionKeys") {
+        if (frame.type === "object") {
+          const slots: PendingSlot[] = [];
+          const keyToSlot = new Map<string, PendingSlot>();
+          for (let k = 0; k < step.orderedKeys.length; k++) {
+            const key = step.orderedKeys[k];
+            const slot = this.createSlot(false, targetSlot);
+            slots.push(slot);
+            keyToSlot.set(key, slot);
+          }
+          frame.unionGroups.push({ stepIdx, step, slots, keyToSlot });
+        }
+      } else if (step.kind === "union") {
+        const slots: PendingSlot[] = [];
+        for (let s = 0; s < step.selectors.length; s++) {
+          slots.push(this.createSlot(false, targetSlot));
+        }
+        frame.unionGroups.push({ stepIdx, step, slots });
+        if (frame.type === "array") {
+          for (let s = 0; s < step.selectors.length; s++) {
+            const sel = step.selectors[s];
+            if (this.selectorNeedsArrayCollector(sel)) {
+              this.createArrayCollectorForFrame(frame, stepIdx, sel, slots[s]);
+            }
+          }
+        }
+      } else if (
+        frame.type === "array" &&
+        this.selectorNeedsArrayCollector(step)
+      ) {
+        const slot = this.createSlot(false, targetSlot);
+        this.createArrayCollectorForFrame(frame, stepIdx, step, slot);
+      }
+    }
+  }
+
   private handleObjectKey(frame: Frame, keyNode: string) {
-    frame.pendingChildSteps.length = 0;
-    const activeSteps = frame.activeSteps;
-    if (activeSteps.length === 0) {
+    frame.pendingChildBranches.length = 0;
+    const branches = frame.activeBranches;
+    if (branches.length === 0) {
       return;
     }
 
     const keyStr = unquoteJsonString(keyNode);
 
-    for (let i = 0; i < activeSteps.length; i++) {
-      const stepIdx = activeSteps[i];
+    for (let g = 0; g < frame.unionGroups.length; g++) {
+      const grp = frame.unionGroups[g];
+      if (grp.step.kind === "unionKeys") {
+        const slot = grp.keyToSlot!.get(keyStr);
+        if (slot) {
+          const nextIdx = grp.stepIdx + 1;
+          if (nextIdx >= this.steps.length) {
+            this.startDirectCapture(slot);
+          } else {
+            pushUniqueBranch(frame.pendingChildBranches, nextIdx, slot);
+          }
+        }
+      } else {
+        const selectors = grp.step.selectors;
+        const nextIdx = grp.stepIdx + 1;
+        for (let s = 0; s < selectors.length; s++) {
+          const sel = selectors[s];
+          const slot = grp.slots[s];
+          let matched = false;
+          if (sel.kind === "child" && sel.key === keyStr) {
+            matched = true;
+          } else if (sel.kind === "wildcard") {
+            matched = true;
+          } else if (sel.kind === "filter") {
+            this.startFilterCandidate(sel, nextIdx, slot);
+          }
+          if (matched) {
+            if (nextIdx >= this.steps.length) {
+              this.startDirectCapture(slot);
+            } else {
+              pushUniqueBranch(frame.pendingChildBranches, nextIdx, slot);
+            }
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < branches.length; i++) {
+      const { stepIdx, targetSlot } = branches[i];
       const step = this.steps[stepIdx];
       let matched = false;
 
       if (step.kind === "child" && step.key === keyStr) {
         matched = true;
-      } else if (step.kind === "unionKeys" && step.keys.has(keyStr)) {
-        matched = true;
       } else if (step.kind === "wildcard") {
         matched = true;
       } else if (step.kind === "filter") {
-        this.startFilterCandidate(stepIdx, step, stepIdx + 1);
+        this.startFilterCandidate(step, stepIdx + 1, targetSlot);
       }
 
       if (matched) {
         const nextIdx = stepIdx + 1;
         if (nextIdx >= this.steps.length) {
-          this.startDirectCapture();
+          this.startDirectCapture(targetSlot);
         } else {
-          pushUnique(frame.pendingChildSteps, nextIdx);
+          pushUniqueBranch(frame.pendingChildBranches, nextIdx, targetSlot);
         }
       }
 
       if (step.recursive) {
-        pushUnique(frame.pendingChildSteps, stepIdx);
+        pushUniqueBranch(frame.pendingChildBranches, stepIdx, targetSlot);
       }
     }
   }
@@ -1667,10 +1954,10 @@ export class StreamingPathEngine implements SaxHandler {
     frame: Frame,
     isScalar: boolean,
     scalarNode?: string
-  ): number[] {
+  ): ActiveBranch[] {
     frame.elementIndex++;
     const idx = frame.elementIndex;
-    const elementSteps: number[] = [];
+    const elementBranches: ActiveBranch[] = [];
 
     const frameCols = frame.arrayCollectors;
     for (let i = 0; i < frameCols.length; i++) {
@@ -1688,9 +1975,83 @@ export class StreamingPathEngine implements SaxHandler {
       }
     }
 
-    const activeSteps = frame.activeSteps;
-    for (let i = 0; i < activeSteps.length; i++) {
-      const stepIdx = activeSteps[i];
+    for (let g = 0; g < frame.unionGroups.length; g++) {
+      const grp = frame.unionGroups[g];
+      if (grp.step.kind !== "union") {
+        continue;
+      }
+      const selectors = grp.step.selectors;
+      const nextIdx = grp.stepIdx + 1;
+      for (let s = 0; s < selectors.length; s++) {
+        const sel = selectors[s];
+        const slot = grp.slots[s];
+        let matched = false;
+
+        if (sel.kind === "index") {
+          if (!sel.rawIndexes.some((n) => n < 0) && sel.indexes.has(idx)) {
+            matched = true;
+          }
+        } else if (sel.kind === "slice") {
+          const hasNeg =
+            sel.step <= 0 ||
+            (sel.start !== undefined && sel.start < 0) ||
+            (sel.end !== undefined && sel.end < 0);
+          if (!hasNeg) {
+            const start = sel.start !== undefined ? sel.start : 0;
+            if (
+              idx >= start &&
+              (sel.end === undefined || idx < sel.end) &&
+              (idx - start) % sel.step === 0
+            ) {
+              matched = true;
+            }
+          }
+        } else if (sel.kind === "script" && sel.staticIndex !== undefined) {
+          if (idx === sel.staticIndex) {
+            matched = true;
+          }
+        } else if (sel.kind === "wildcard") {
+          matched = true;
+        } else if (sel.kind === "filter") {
+          if (isScalar && scalarNode !== undefined) {
+            let parsed: any;
+            try {
+              parsed = JSON.parse(scalarNode);
+            } catch {
+              parsed = undefined;
+            }
+            if (ConditionEval.evalFilterAst(sel.ast, parsed)) {
+              if (nextIdx >= this.steps.length) {
+                slot.results.push(scalarNode);
+              } else {
+                const sub = evaluateStepsOnValue(parsed, this.steps, nextIdx);
+                for (let k = 0; k < sub.length; k++) {
+                  slot.results.push(JSON.stringify(sub[k]));
+                }
+              }
+            }
+          } else {
+            this.startFilterCandidate(sel, nextIdx, slot);
+          }
+        }
+
+        if (matched) {
+          if (nextIdx >= this.steps.length) {
+            if (isScalar && scalarNode !== undefined) {
+              slot.results.push(scalarNode);
+            } else {
+              this.startDirectCapture(slot);
+            }
+          } else {
+            pushUniqueBranch(elementBranches, nextIdx, slot);
+          }
+        }
+      }
+    }
+
+    const branches = frame.activeBranches;
+    for (let i = 0; i < branches.length; i++) {
+      const { stepIdx, targetSlot } = branches[i];
       const step = this.steps[stepIdx];
       let matched = false;
 
@@ -1730,13 +2091,13 @@ export class StreamingPathEngine implements SaxHandler {
           if (ConditionEval.evalFilterAst(step.ast, parsed)) {
             const nextIdx = stepIdx + 1;
             if (nextIdx >= this.steps.length) {
-              const slot = this.createSlot(false);
+              const slot = this.createSlot(false, targetSlot);
               slot.results.push(scalarNode);
               slot.done = true;
             } else {
               const sub = evaluateStepsOnValue(parsed, this.steps, nextIdx);
               if (sub.length > 0) {
-                const slot = this.createSlot(false);
+                const slot = this.createSlot(false, targetSlot);
                 for (let k = 0; k < sub.length; k++) {
                   slot.results.push(JSON.stringify(sub[k]));
                 }
@@ -1745,7 +2106,7 @@ export class StreamingPathEngine implements SaxHandler {
             }
           }
         } else {
-          this.startFilterCandidate(stepIdx, step, stepIdx + 1);
+          this.startFilterCandidate(step, stepIdx + 1, targetSlot);
         }
       }
 
@@ -1753,7 +2114,7 @@ export class StreamingPathEngine implements SaxHandler {
         const nextIdx = stepIdx + 1;
         if (nextIdx >= this.steps.length) {
           if (isScalar && scalarNode !== undefined) {
-            const slot = this.createSlot(true);
+            const slot = this.createSlot(true, targetSlot);
             if (slot.streaming) {
               this.emitResultString(scalarNode);
             } else {
@@ -1761,19 +2122,19 @@ export class StreamingPathEngine implements SaxHandler {
             }
             slot.done = true;
           } else {
-            this.startDirectCapture();
+            this.startDirectCapture(targetSlot);
           }
         } else {
-          pushUnique(elementSteps, nextIdx);
+          pushUniqueBranch(elementBranches, nextIdx, targetSlot);
         }
       }
 
       if (step.recursive) {
-        pushUnique(elementSteps, stepIdx);
+        pushUniqueBranch(elementBranches, stepIdx, targetSlot);
       }
     }
 
-    return elementSteps;
+    return elementBranches;
   }
 
   onopenobject(keyNode?: string) {
@@ -1822,17 +2183,17 @@ export class StreamingPathEngine implements SaxHandler {
       this.activeElCollectors[i].currentElementCollector?.openObject(keyNode);
     }
 
-    // 2. Determine incoming steps for this new object
-    let incomingSteps: number[];
+    // 2. Determine incoming branches for this new object
+    let incomingBranches: ActiveBranch[];
     const parent = this.frameStack[this.frameStack.length - 1];
     if (!parent) {
-      incomingSteps = this.rootPendingSteps;
-      this.rootPendingSteps = [];
+      incomingBranches = this.rootPendingBranches;
+      this.rootPendingBranches = [];
     } else if (parent.type === "object") {
-      incomingSteps = parent.pendingChildSteps;
-      parent.pendingChildSteps = [];
+      incomingBranches = parent.pendingChildBranches;
+      parent.pendingChildBranches = [];
     } else {
-      incomingSteps = this.evaluateArrayElementSteps(parent, false);
+      incomingBranches = this.evaluateArrayElementSteps(parent, false);
       for (let i = prevCaptureCount; i < this.activeCaptures.length; i++) {
         this.activeCaptures[i].collector.openObject(keyNode);
       }
@@ -1846,22 +2207,24 @@ export class StreamingPathEngine implements SaxHandler {
       }
     }
 
-    if (incomingSteps.length === 0) {
+    if (incomingBranches.length === 0) {
       this.skipDepth = 1;
       this.updateSkipDecode();
       return;
     }
 
-    // 3. Push object frame
+    // 3. Push object frame & initialize any union/unionKeys groups
     const frame: Frame = {
       type: "object",
       depth: this.frameStack.length + 1,
-      activeSteps: incomingSteps,
+      activeBranches: incomingBranches,
       elementIndex: -1,
-      pendingChildSteps: [],
+      pendingChildBranches: [],
       arrayCollectors: [],
+      unionGroups: [],
     };
     this.frameStack.push(frame);
+    this.initFrame(frame);
 
     // 4. Process first key if object is non-empty
     if (keyNode !== undefined) {
@@ -1886,8 +2249,11 @@ export class StreamingPathEngine implements SaxHandler {
       return;
     }
 
-    this.frameStack.pop();
+    const closedFrame = this.frameStack.pop();
     this.advanceCloseObjectOnActive();
+    if (closedFrame && closedFrame.unionGroups.length > 0) {
+      this.finalizeUnionGroups(closedFrame);
+    }
     this.updateSkipDecode();
     this.flushPendingSlots();
     this.checkEarlyExit();
@@ -1996,17 +2362,17 @@ export class StreamingPathEngine implements SaxHandler {
       this.activeElCollectors[i].currentElementCollector?.openArray();
     }
 
-    // 2. Determine incoming steps for this new array
-    let incomingSteps: number[];
+    // 2. Determine incoming branches for this new array
+    let incomingBranches: ActiveBranch[];
     const parent = this.frameStack[this.frameStack.length - 1];
     if (!parent) {
-      incomingSteps = this.rootPendingSteps;
-      this.rootPendingSteps = [];
+      incomingBranches = this.rootPendingBranches;
+      this.rootPendingBranches = [];
     } else if (parent.type === "object") {
-      incomingSteps = parent.pendingChildSteps;
-      parent.pendingChildSteps = [];
+      incomingBranches = parent.pendingChildBranches;
+      parent.pendingChildBranches = [];
     } else {
-      incomingSteps = this.evaluateArrayElementSteps(parent, false);
+      incomingBranches = this.evaluateArrayElementSteps(parent, false);
       for (let i = prevCaptureCount; i < this.activeCaptures.length; i++) {
         this.activeCaptures[i].collector.openArray();
       }
@@ -2020,38 +2386,24 @@ export class StreamingPathEngine implements SaxHandler {
       }
     }
 
-    if (incomingSteps.length === 0) {
+    if (incomingBranches.length === 0) {
       this.skipDepth = 1;
       this.updateSkipDecode();
       return;
     }
 
-    // 3. Push array frame & attach any dynamic array collectors (e.g. @.length, negative slice/index)
+    // 3. Push array frame & attach any union groups / dynamic array collectors
     const frame: Frame = {
       type: "array",
       depth: this.frameStack.length + 1,
-      activeSteps: incomingSteps,
+      activeBranches: incomingBranches,
       elementIndex: -1,
-      pendingChildSteps: [],
+      pendingChildBranches: [],
       arrayCollectors: [],
+      unionGroups: [],
     };
     this.frameStack.push(frame);
-
-    for (let i = 0; i < incomingSteps.length; i++) {
-      const stepIdx = incomingSteps[i];
-      const step = this.steps[stepIdx];
-      const needsArrayCollector =
-        (step.kind === "script" && step.staticIndex === undefined) ||
-        (step.kind === "index" && step.rawIndexes.some((n) => n < 0)) ||
-        (step.kind === "slice" &&
-          step.step !== 0 &&
-          (step.step < 0 ||
-            (step.start !== undefined && step.start < 0) ||
-            (step.end !== undefined && step.end < 0)));
-      if (needsArrayCollector) {
-        this.createArrayCollectorForFrame(frame, stepIdx, step);
-      }
-    }
+    this.initFrame(frame);
   }
 
   onclosearray() {
@@ -2074,9 +2426,14 @@ export class StreamingPathEngine implements SaxHandler {
     const closedFrame = this.frameStack.pop();
     this.advanceCloseArrayOnActive();
 
-    if (closedFrame && closedFrame.arrayCollectors.length > 0) {
-      for (let i = 0; i < closedFrame.arrayCollectors.length; i++) {
-        this.finalizeArrayCollector(closedFrame.arrayCollectors[i]);
+    if (closedFrame) {
+      if (closedFrame.arrayCollectors.length > 0) {
+        for (let i = 0; i < closedFrame.arrayCollectors.length; i++) {
+          this.finalizeArrayCollector(closedFrame.arrayCollectors[i]);
+        }
+      }
+      if (closedFrame.unionGroups.length > 0) {
+        this.finalizeUnionGroups(closedFrame);
       }
     }
 
@@ -2199,7 +2556,7 @@ export class StreamingPathEngine implements SaxHandler {
 
     const top = this.frameStack[this.frameStack.length - 1];
     if (top && top.type === "object") {
-      top.pendingChildSteps.length = 0;
+      top.pendingChildBranches.length = 0;
     } else if (top && top.type === "array") {
       this.evaluateArrayElementSteps(top, true, valNode);
     }

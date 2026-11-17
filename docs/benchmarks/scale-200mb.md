@@ -1,6 +1,6 @@
 # 200 MiB Scale Benchmark (`200.01 MiB` / `209.72 MB` JSON)
 
-Large-scale 13-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
+Large-scale 15-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
 
 ```bash
 npm run benchmark:200mb
@@ -24,6 +24,8 @@ npm run benchmark:filters   # ConditionEval RFC 9535 microbenchmark
 | **11. Reverse slice** `$[10:0:-1]` (10) | 1077.44 ms | **1054.89 ms** | N/A | N/A | N/A | N/A | N/A | 1840.44 ms |
 | **12. Equality filter** `$[?(@.type == "IssuesEvent")].id` (3,035) | 1480.75 ms | **1460.66 ms** | N/A | N/A | N/A | N/A | N/A | 1866.99 ms |
 | **13. Missing intermediate comparison** `$[?(@.payload.issue.number > 1000)].payload.issue.number` (1,405) | 1624.27 ms | **1610.40 ms** | N/A | N/A | N/A | N/A | N/A | N/A *(throws `TypeError`)* |
+| **14. Heterogeneous union** `$[2,0,2,1:3].id` (5) | 1.42 ms | **0.48 ms** | N/A | N/A | N/A | N/A | N/A | 1482.23 ms |
+| **15. Key union** `$[*]['type','id']` (125,366) | 1387.07 ms | 1374.04 ms | **1256.29 ms** *(doc order)* | N/A | 5724.10 ms *(doc order)* | 3562.81 ms *(doc order)* | N/A | 2153.09 ms *(selector order)* |
 
 ## ConditionEval RFC 9535 Microbenchmark (`npm run benchmark:filters`)
 
@@ -43,6 +45,9 @@ Single-threaded CPU throughput over 200,000 pre-compiled AST evaluations ([`benc
 ## Key Takeaways
 
 - **#1 overall on every point lookup and slice**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.45 ms** vs `3301.31 ms`, **~7,336x**), mid-file (**601.17 ms** vs `2061.89 ms`, **~3.4x**), end-of-file (**1052.55 ms** vs `1765.17 ms`, **~1.7x**; and ahead of `@sapientpro/json-stream` at `1121.61 ms`), forward slice `$[0:10:2]` (**1.24 ms** vs `2104.39 ms`, **~1,697x**), and reverse slice `$[10:0:-1]` (**1054.89 ms** vs `1840.44 ms`, **~1.7x**; all other streaming parsers lack RFC 9535 slice support).
+- **#1 overall on heterogeneous unions & selector-ordered key unions**:
+  - `$[2,0,2,1:3].id` (mixed reordered index + duplicate + slice): **0.48 ms** (`string`) / **1.42 ms** (`stream`) vs `jsonpath-plus` `1482.23 ms` (**~3,088x** faster via bounded `rootMaxIndex` early-exit); all other streaming parsers lack heterogeneous unions.
+  - `$[*]['type','id']` (125,366 matches, preserving RFC 9535 selector order `type` before `id`): **1374.04 ms** (`string`) / **1387.07 ms** (`stream`), **~1.57x** faster than `jsonpath-plus` (`2153.09 ms`), **~2.59x** faster than `@streamparser/json` (`3562.81 ms`), and **~4.17x** faster than `stream-json` (`5724.10 ms`)—and the only streaming parser preserving selector order instead of document key order.
 - **#1 overall on nested wildcards & RFC 9535 filters (`?[...]`, `==`, `Nothing`-safe comparisons)**:
   - `$[*].payload.commits[*].author.email`: **1611.00 ms** (faster than `json-web-streams` `1669.64 ms`, `jsonpath-plus` `1735.45 ms`, `@sapientpro/json-stream` `1911.17 ms`, `@streamparser/json` `3756.11 ms`, `Oboe` `4499.91 ms`, and `stream-json` `5619.68 ms`).
   - `$..user.login`: **2602.03 ms** (faster than `@sapientpro/json-stream` `3138.20 ms`, `Oboe` `4518.88 ms`, and `stream-json` `5488.51 ms`).
