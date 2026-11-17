@@ -482,4 +482,143 @@ describe("JSONPath complete features", function () {
       expect(parsed[199]).toBe(`item-number-199-${"x".repeat(30)}`);
     });
   });
+
+  describe("RFC 9535 Lexical Escapes, I-JSON Limits & Member Name Shorthand (Issue #25)", function () {
+    it("should decode \\b, \\f, \\n, \\r, \\t, \\/, \\uXXXX, and surrogate pairs in quoted selectors", async function () {
+      const obj = {
+        "\b": "bs",
+        "\f": "ff",
+        "a/b": "slash",
+        "😀": "grinning",
+        a: "alpha",
+        "line\nbreak\t1": "ctrl",
+        "q'single": "sq",
+        'q"double': "dq",
+      };
+
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['\\b']"))).toEqual(["bs"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['\\f']"))).toEqual(["ff"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['a\\/b']"))).toEqual(["slash"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['\\uD83D\\uDE00']"))).toEqual(["grinning"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), '$["\\uD83D\\uDE00"]'))).toEqual(["grinning"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['\\u0061']"))).toEqual(["alpha"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['line\\nbreak\\t1']"))).toEqual(["ctrl"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['q\\'single']"))).toEqual(["sq"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), '$["q\\"double"]'))).toEqual(["dq"]);
+
+      // Also match when the input JSON itself encodes keys as \uXXXX / \/ escapes
+      const rawEscapedJson = '{"\\uD83D\\uDE00":"grinning","\\u0061":"alpha","a\\/b":"slash"}';
+      expect(JSON.parse(await Piffero.findAsPromise(Readable.from([rawEscapedJson]), "$['\\uD83D\\uDE00']"))).toEqual(["grinning"]);
+      expect(JSON.parse(await Piffero.findAsPromise(Readable.from([rawEscapedJson]), "$.a"))).toEqual(["alpha"]);
+      expect(JSON.parse(await Piffero.findAsPromise(Readable.from([rawEscapedJson]), "$['a/b']"))).toEqual(["slash"]);
+
+      // Key union and recursive descent with surrogate pair escapes
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(obj), "$['\\b','\\f','\\uD83D\\uDE00']"))).toEqual([
+        "bs",
+        "ff",
+        "grinning",
+      ]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream({ nested: obj }), "$..['\\uD83D\\uDE00']"))).toEqual([
+        "grinning",
+      ]);
+    });
+
+    it("should decode surrogate pairs and escapes inside filter string literals", async function () {
+      const items = [
+        { id: 1, icon: "😀", note: "ok\b\f/x" },
+        { id: 2, icon: "🚀", note: "other" },
+      ];
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(items),
+            '$[?(@.icon === "\\uD83D\\uDE00")].id'
+          )
+        )
+      ).toEqual([1]);
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(
+            makeStream(items),
+            "$[?(@.note === 'ok\\b\\f\\/x')].id"
+          )
+        )
+      ).toEqual([1]);
+    });
+
+    it("should reject malformed escapes, lone surrogates, and unescaped control characters", function () {
+      const invalidEscapePaths = [
+        "$['\\u12']",
+        "$['\\u']",
+        "$['\\uZZZZ']",
+        "$['\\uD83D']",
+        "$['\\uD83Dabc']",
+        "$['\\uD83D\\u0041']",
+        "$['\\uDE00']",
+        "$['\\a']",
+        "$['\\x20']",
+        "$[\"\\'\"]",
+        "$['\\\"']",
+        "$['a\nb']",
+        "$['a\\']",
+        '$[?(@.x === "\\uD83D")]',
+        '$[?(@.x === "\\u12")]',
+        '$[?(@.x === "\\a")]',
+        '$[?(@.x === "a\nb")]',
+      ];
+      for (const p of invalidEscapePaths) {
+        expect(() => parse(p)).toThrowError(PifferoJsonPathError);
+      }
+    });
+
+    it("should enforce I-JSON integer bounds [-(2^53)+1, (2^53)-1] on index and slice selectors", function () {
+      expect(() => parse("$[9007199254740991]")).not.toThrow();
+      expect(() => parse("$[-9007199254740991]")).not.toThrow();
+      expect(() => parse("$[9007199254740991:9007199254740991:1]")).not.toThrow();
+      expect(() => parse("$[0]")).not.toThrow();
+
+      const invalidIntPaths = [
+        "$[9007199254740992]",
+        "$[-9007199254740992]",
+        "$[0,9007199254740992]",
+        "$[9007199254740992:1]",
+        "$[0:9007199254740992]",
+        "$[0:10:9007199254740992]",
+        "$[01]",
+        "$[-0]",
+        "$[01:2]",
+        "$[0:-0]",
+      ];
+      for (const p of invalidIntPaths) {
+        expect(() => parse(p)).toThrowError(PifferoJsonPathError);
+      }
+    });
+
+    it("should validate member-name-shorthand per RFC 9535 §2.5.1.1", async function () {
+      const data = {
+        _ok1: 10,
+        "😀": 20,
+        nested: { _inner2: 30 },
+      };
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(data), "$._ok1"))).toEqual([10]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(data), "$.😀"))).toEqual([20]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(data), "$.._inner2"))).toEqual([30]);
+
+      const invalidShorthands = [
+        "$.1",
+        "$.1a",
+        "$..0",
+        "$.foo-bar",
+        "$.foo bar",
+        "$.$a",
+        "$.a+b",
+        "$. a",
+        "$.a ",
+        "$.\uD800",
+      ];
+      for (const p of invalidShorthands) {
+        expect(() => parse(p)).toThrowError(PifferoJsonPathError);
+      }
+    });
+  });
 });

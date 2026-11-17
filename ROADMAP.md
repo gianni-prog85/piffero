@@ -56,7 +56,7 @@ Ordine di implementazione consigliato (per dipendenze e impatto):
    - Normalizzazione a compile-time in `parseBracketSubscript` con zero overhead runtime e hit rate invariato su `astCache`.
 2. [x] **#23 — Semantica Slice RFC 9535 (`step < 0`, `step === 0`, `end === 0`)** ([OpenSpec](./openspec/changes/rfc9535-slice-semantics/proposal.md))
    - Algoritmo `Bounds` ufficiale, correzione di `end === 0`, fast-path O(1) preservato per `step > 0` e ring-buffer O(`k`) per tail reverse slice.
-3. [ ] **#25 — Escape Unicode (`\uXXXX`, surrogate) e validazione I-JSON / `member-name-shorthand`** ([OpenSpec](./openspec/changes/rfc9535-lexical-escapes-validation/proposal.md))
+3. [x] **#25 — Escape Unicode (`\uXXXX`, surrogate) e validazione I-JSON / `member-name-shorthand`** ([OpenSpec](./openspec/changes/rfc9535-lexical-escapes-validation/proposal.md))
    - Fast-path `indexOf("\\") === -1` e validazione esclusivamente a compile-time.
 4. [ ] **#24 — Semantica esistenza, confronti e `Nothing` nei filtri** ([OpenSpec](./openspec/changes/rfc9535-filter-semantics-nothing/proposal.md))
    - Sentinella singleton `NOTHING` a zero allocazioni, equality strutturale con fast-path primitivo e preservazione dell'early-skip di `PrunedJsBuilder`.

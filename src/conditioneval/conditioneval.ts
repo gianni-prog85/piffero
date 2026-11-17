@@ -32,14 +32,52 @@ interface ExprToken {
   value: string;
 }
 
-function unescapeStringLiteral(raw: string): string {
-  const inner = raw.slice(1, -1);
+function hasLoneSurrogate(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      if (i + 1 >= str.length) {
+        return true;
+      }
+      const next = str.charCodeAt(i + 1);
+      if (next < 0xDC00 || next > 0xDFFF) {
+        return true;
+      }
+      i++;
+    } else if (code >= 0xDC00 && code <= 0xDFFF) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function decodeJsonPathStringInner(inner: string, quote: string): string {
+  if (inner.indexOf("\\") === -1) {
+    if (/[\u0000-\u001F]/.test(inner)) {
+      throw new Error("Unescaped control character in string literal");
+    }
+    if (/[\uD800-\uDFFF]/.test(inner) && hasLoneSurrogate(inner)) {
+      throw new Error("Lone UTF-16 surrogate in string literal");
+    }
+    return inner;
+  }
+
   let out = "";
-  for (let i = 0; i < inner.length; i++) {
+  const len = inner.length;
+  for (let i = 0; i < len; i++) {
     const ch = inner[i];
-    if (ch === "\\" && i + 1 < inner.length) {
+    if (ch === "\\") {
+      if (i + 1 >= len) {
+        throw new Error("Trailing backslash in string literal");
+      }
       const next = inner[++i];
       switch (next) {
+        case "b":
+          out += "\b";
+          break;
+        case "f":
+          out += "\f";
+          break;
         case "n":
           out += "\n";
           break;
@@ -49,43 +87,90 @@ function unescapeStringLiteral(raw: string): string {
         case "t":
           out += "\t";
           break;
-        case "b":
-          out += "\b";
-          break;
-        case "f":
-          out += "\f";
+        case "/":
+          out += "/";
           break;
         case "\\":
           out += "\\";
           break;
         case "'":
+          if (quote === '"') {
+            throw new Error("Invalid escape \\' in double-quoted string literal");
+          }
           out += "'";
           break;
         case '"':
+          if (quote === "'") {
+            throw new Error('Invalid escape \\" in single-quoted string literal');
+          }
           out += '"';
           break;
         case "`":
+          if (quote !== "`") {
+            throw new Error("Invalid escape \\` in string literal");
+          }
           out += "`";
           break;
-        case "u":
-          if (i + 4 < inner.length) {
-            const hex = inner.slice(i + 1, i + 5);
-            if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-              out += String.fromCharCode(parseInt(hex, 16));
-              i += 4;
-              break;
-            }
+        case "u": {
+          if (i + 4 >= len) {
+            throw new Error("Incomplete Unicode escape sequence \\u");
           }
-          out += "u";
+          const hex = inner.slice(i + 1, i + 5);
+          if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+            throw new Error(`Invalid Unicode escape sequence \\u${hex}`);
+          }
+          const code = parseInt(hex, 16);
+          i += 4;
+          if (code >= 0xD800 && code <= 0xDBFF) {
+            if (i + 6 >= len || inner[i + 1] !== "\\" || inner[i + 2] !== "u") {
+              throw new Error(`Lone high surrogate \\u${hex} in string literal`);
+            }
+            const lowHex = inner.slice(i + 3, i + 7);
+            if (!/^[0-9a-fA-F]{4}$/.test(lowHex)) {
+              throw new Error(`Invalid Unicode escape sequence \\u${lowHex}`);
+            }
+            const lowCode = parseInt(lowHex, 16);
+            if (lowCode < 0xDC00 || lowCode > 0xDFFF) {
+              throw new Error(`Invalid low surrogate \\u${lowHex} in string literal`);
+            }
+            out += String.fromCharCode(code, lowCode);
+            i += 6;
+          } else if (code >= 0xDC00 && code <= 0xDFFF) {
+            throw new Error(`Lone low surrogate \\u${hex} in string literal`);
+          } else {
+            out += String.fromCharCode(code);
+          }
           break;
+        }
         default:
-          out += next;
+          throw new Error(`Invalid escape sequence \\${next} in string literal`);
       }
     } else {
-      out += ch;
+      const code = ch.charCodeAt(0);
+      if (code < 0x20) {
+        throw new Error("Unescaped control character in string literal");
+      }
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        if (i + 1 >= len) {
+          throw new Error("Lone high surrogate in string literal");
+        }
+        const nextCode = inner.charCodeAt(i + 1);
+        if (nextCode < 0xDC00 || nextCode > 0xDFFF) {
+          throw new Error("Lone high surrogate in string literal");
+        }
+        out += ch + inner[++i];
+      } else if (code >= 0xDC00 && code <= 0xDFFF) {
+        throw new Error("Lone low surrogate in string literal");
+      } else {
+        out += ch;
+      }
     }
   }
   return out;
+}
+
+function unescapeStringLiteral(raw: string): string {
+  return decodeJsonPathStringInner(raw.slice(1, -1), raw[0]);
 }
 
 function tokenizeExpression(expr: string): ExprToken[] {
