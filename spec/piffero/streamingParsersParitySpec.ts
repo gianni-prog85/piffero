@@ -205,4 +205,47 @@ describe("Piffero vs @sapientpro/json-stream vs stream-json vs json-web-streams 
     expect(JSON.parse(unionRaw)).toEqual(["John", "doe"]);
     expect(JSON.parse(negRaw)).toEqual(["0123-4567-8910"]);
   });
+
+  it("matches @sapientpro/json-stream and json-web-streams on RFC 9535 Unicode escapes, surrogate pairs, and lexical validation", async function () {
+    const { parse } = require("../../src/handler/mastehandler");
+    const payloads = [
+      Buffer.from(JSON.stringify({ a: 1, "😀": 2, "a/b": 3 })),
+      Buffer.from('{"\\u0061":1,"\\uD83D\\uDE00":2,"a\\/b":3}'),
+    ];
+    const paths = ["$['\\u0061']", "$['\\uD83D\\uDE00']", "$['a\\/b']", "$.😀"];
+    const TextDecoderStreamCtor = (globalThis as any).TextDecoderStream;
+
+    for (const buf of payloads) {
+      for (const p of paths) {
+        const pifferoRaw = await Piffero.findAsPromise(Readable.from([buf]), p);
+
+        const sapientMatches: any[] = [];
+        const ps = createParser();
+        ps.onValue(p, (v: any) => sapientMatches.push(v));
+        const input = createDecodedInput(ps);
+        input.write(buf);
+        input.end();
+
+        const jwsMatches: any[] = [];
+        const webStream = (Readable as any)
+          .toWeb(Readable.from([buf]))
+          .pipeThrough(new TextDecoderStreamCtor())
+          .pipeThrough(new JSONParseStream([p]));
+        for await (const chunk of webStream as AsyncIterable<{ value: any }>) {
+          jwsMatches.push(chunk.value);
+        }
+
+        const expected = JSON.parse(pifferoRaw);
+        expect(sapientMatches).toEqual(expected);
+        expect(jwsMatches).toEqual(expected);
+      }
+    }
+
+    const pSapient = createParser();
+    for (const invalidPath of ["$['\\uD83D']", "$[9007199254740992]", "$.1"]) {
+      expect(() => parse(invalidPath)).toThrow();
+      expect(() => pSapient.onValue(invalidPath, () => {})).toThrowError(SyntaxError);
+      expect(() => new JSONParseStream([invalidPath])).toThrow();
+    }
+  });
 });
