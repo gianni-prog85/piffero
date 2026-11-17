@@ -1,6 +1,6 @@
 # 200 MiB Scale Benchmark (`200.01 MiB` / `209.72 MB` JSON)
 
-Large-scale 8-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
+Large-scale 9-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
 
 ```bash
 npm run benchmark:200mb
@@ -10,20 +10,21 @@ npm run benchmark:200mb
 
 | Scenario (matches extracted) | Piffero (stream) | Piffero (string) | `@sapientpro/json-stream` | `json-web-streams` | `stream-json` | `@streamparser/json` | `Oboe` | `jsonpath-plus` (in-memory) |
 |---|---|---|---|---|---|---|---|---|
-| **1. Early file** `$.[1].payload` (1) | 1.47 ms | **0.44 ms** | 0.77 ms | N/A | 3.05 ms | 0.93 ms | 10.51 ms | 3237.53 ms |
-| **2. Mid file** `$.[31341].payload` (1) | 619.18 ms | **590.01 ms** | 624.34 ms | N/A | 2240.51 ms | 1712.21 ms | 3095.61 ms | 2013.73 ms |
-| **3. End file** `$.[56754]...received_events_url` (1) | 1036.13 ms | **1007.26 ms** | 1116.58 ms | N/A | 3972.58 ms | 3103.23 ms | 3987.43 ms | 2036.98 ms |
-| **4. Root array** `$[*]` (62,683) | 3637.70 ms | 3165.28 ms | 1923.56 ms | **1308.05 ms** | 4667.08 ms | 2990.10 ms | 4495.31 ms | 1356.90 ms |
-| **5. Wildcard shallow** `$[*].actor.login` (62,683) | 1320.95 ms | 1349.54 ms | **1236.39 ms** | 1550.16 ms | 5517.31 ms | 3401.34 ms | 4216.74 ms | 1402.60 ms |
-| **6. Nested wildcard** `$[*].payload.commits[*].author.email` (55,729) | 1498.37 ms | 1491.72 ms | 1788.61 ms | 1647.89 ms | 5463.27 ms | 3539.04 ms | 4248.27 ms | **1453.82 ms** |
-| **7. Recursive descent** `$..user.login` (23,715) | 2473.69 ms | 2496.88 ms | 3018.34 ms | N/A | 5425.97 ms | N/A | 4115.83 ms | **1635.88 ms** |
-| **8. Existence filter** `$[?(@.payload.issue)].payload.issue.number` (7,725) | 1599.74 ms | **1578.08 ms** | N/A | N/A | N/A | N/A | 4148.77 ms | **1406.57 ms** |
+| **1. Early file** `$.[1].payload` (1) | 1.65 ms | **0.45 ms** | 0.73 ms | N/A | 4.48 ms | 1.09 ms | 9.48 ms | 3301.31 ms |
+| **2. Mid file** `$.[31341].payload` (1) | 639.93 ms | **601.17 ms** | 626.28 ms | N/A | 2214.46 ms | 1711.00 ms | 3230.70 ms | 2061.89 ms |
+| **3. End file** `$.[56754]...received_events_url` (1) | 1112.33 ms | **1052.55 ms** | 1121.61 ms | N/A | 4103.15 ms | 3171.93 ms | 4118.41 ms | 1765.17 ms |
+| **4. Root array** `$[*]` (62,683) | 3801.74 ms | 3346.97 ms | 2017.74 ms | **1423.78 ms** | 4901.11 ms | 3084.99 ms | 4722.44 ms | 2049.36 ms |
+| **5. Wildcard shallow** `$[*].actor.login` (62,683) | 1415.59 ms | 1420.62 ms | **1355.27 ms** | 1575.34 ms | 5638.33 ms | 3633.72 ms | 4547.38 ms | 1571.26 ms |
+| **6. Nested wildcard** `$[*].payload.commits[*].author.email` (55,729) | **1611.00 ms** | 1611.78 ms | 1911.17 ms | 1669.64 ms | 5619.68 ms | 3756.11 ms | 4499.91 ms | 1735.45 ms |
+| **7. Recursive descent** `$..user.login` (23,715) | 2717.13 ms | 2602.03 ms | 3138.20 ms | N/A | 5488.51 ms | N/A | 4518.88 ms | **1826.14 ms** |
+| **8. Existence filter (Goessner)** `$[?(@.payload.issue)].payload.issue.number` (7,725) | 1729.33 ms | 1714.03 ms | N/A | N/A | N/A | N/A | 4539.49 ms | **1568.55 ms** |
+| **9. Existence filter (RFC 9535 `?[...]`)** `$[?@.payload.issue].payload.issue.number` (7,725) | 1620.08 ms | **1590.25 ms** | N/A | N/A (throws `Unsupported node: FilterSelector`) | N/A | N/A | 4502.94 ms *(duck-typing)* | N/A *(returns `[]`)* |
 
 ## Key Takeaways
 
-- **#1 overall on every point lookup**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.44 ms** vs `3237.53 ms`, **~7,358x**), mid-file (**590.01 ms** vs `2013.73 ms`, **~3.4x**), and end-of-file (**1007.26 ms** vs `2036.98 ms`, **~2.0x**; and ahead of `@sapientpro/json-stream` at `1116.58 ms`).
-- **#1 streaming parser on nested wildcards, recursive descent, and filters**:
-  - `$[*].payload.commits[*].author.email`: **1491.72 ms** (faster than `json-web-streams` `1647.89 ms`, `@sapientpro/json-stream` `1788.61 ms`, `@streamparser/json` `3539.04 ms`, `Oboe` `4248.27 ms`, and `stream-json` `5463.27 ms`).
-  - `$..user.login`: **2473.69 ms** (faster than `@sapientpro/json-stream` `3018.34 ms`, `Oboe` `4115.83 ms`, and `stream-json` `5425.97 ms`).
-  - `$[?(@.payload.issue)].payload.issue.number`: **1578.08 ms** (**~2.6x** faster than `Oboe` duck-typing at `4148.77 ms`; all other tested streaming parsers lack filter support).
+- **#1 overall on every point lookup**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.45 ms** vs `3301.31 ms`, **~7,336x**), mid-file (**601.17 ms** vs `2061.89 ms`, **~3.4x**), and end-of-file (**1052.55 ms** vs `1765.17 ms`, **~1.7x**; and ahead of `@sapientpro/json-stream` at `1121.61 ms`).
+- **#1 overall on nested wildcards & RFC 9535 filters (`?[...]`)**:
+  - `$[*].payload.commits[*].author.email`: **1611.00 ms** (faster than `json-web-streams` `1669.64 ms`, `jsonpath-plus` `1735.45 ms`, `@sapientpro/json-stream` `1911.17 ms`, `@streamparser/json` `3756.11 ms`, `Oboe` `4499.91 ms`, and `stream-json` `5619.68 ms`).
+  - `$..user.login`: **2602.03 ms** (faster than `@sapientpro/json-stream` `3138.20 ms`, `Oboe` `4518.88 ms`, and `stream-json` `5488.51 ms`).
+  - `$[?@.payload.issue].payload.issue.number` (RFC 9535 without parentheses): **1590.25 ms** (**~2.8x** faster than `Oboe` duck-typing at `4502.94 ms`), while `jsonpath-plus` silently returns `[]` and `json-web-streams` throws `Unsupported node: FilterSelector`.
 - **Consistent bounded-memory scaling**: Scaling 5.35x from 38 MB to 200 MiB keeps Piffero's throughput linear while avoiding full-document V8 heap allocation.

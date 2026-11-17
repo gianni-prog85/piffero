@@ -167,18 +167,20 @@ function parseBracketSubscript(
     return { kind: "wildcard", recursive };
   }
 
-  // Filter expression: ?(...)
+  // Filter expression: ?expr or ?(expr) (RFC 9535 §2.3.5)
   if (inner.startsWith("?")) {
-    if (inner.length < 4 || inner[1] !== "(") {
-      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
-    }
-    const closeParen = findMatchingBracket(inner, 1, "(", ")");
-    if (closeParen !== inner.length - 1) {
-      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
-    }
-    const expr = inner.slice(2, -1).trim();
+    let expr = inner.slice(1).trim();
     if (!expr) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+    }
+    if (
+      expr.startsWith("(") &&
+      findMatchingBracket(expr, 0, "(", ")") === expr.length - 1
+    ) {
+      expr = expr.slice(1, -1).trim();
+      if (!expr) {
+        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+      }
     }
     try {
       const ast = ConditionEval.compile(expr);
