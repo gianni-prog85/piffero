@@ -54,7 +54,7 @@ Ordine di implementazione consigliato (per dipendenze e impatto):
 
 1. [x] **#20 — Filtri senza parentesi tonde `?[...]`** ([OpenSpec](./openspec/changes/rfc9535-filter-parentheses/proposal.md))
    - Normalizzazione a compile-time in `parseBracketSubscript` con zero overhead runtime e hit rate invariato su `astCache`.
-2. [ ] **#23 — Semantica Slice RFC 9535 (`step < 0`, `step === 0`, `end === 0`)** ([OpenSpec](./openspec/changes/rfc9535-slice-semantics/proposal.md))
+2. [x] **#23 — Semantica Slice RFC 9535 (`step < 0`, `step === 0`, `end === 0`)** ([OpenSpec](./openspec/changes/rfc9535-slice-semantics/proposal.md))
    - Algoritmo `Bounds` ufficiale, correzione di `end === 0`, fast-path O(1) preservato per `step > 0` e ring-buffer O(`k`) per tail reverse slice.
 3. [ ] **#25 — Escape Unicode (`\uXXXX`, surrogate) e validazione I-JSON / `member-name-shorthand`** ([OpenSpec](./openspec/changes/rfc9535-lexical-escapes-validation/proposal.md))
    - Fast-path `indexOf("\\") === -1` e validazione esclusivamente a compile-time.

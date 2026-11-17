@@ -250,9 +250,6 @@ function parseBracketSubscript(
     const start = startRaw === "" ? undefined : Number(startRaw);
     const end = endRaw === "" ? undefined : Number(endRaw);
     const step = stepRaw === undefined || stepRaw === "" ? 1 : Number(stepRaw);
-    if (step <= 0) {
-      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
-    }
     return { kind: "slice", start, end, step, recursive };
   }
 
@@ -441,7 +438,7 @@ export function buildLegacyAndDetermineEngine(
       }
       const range = {
         start: step.rawIndexes[0],
-        ...(isMulti ? {} : { end: 0, step: 1 }),
+        ...(isMulti ? {} : { step: 1 }),
       };
       if (canAttachToCurrent) {
         current.isbulk = true;
@@ -464,15 +461,10 @@ export function buildLegacyAndDetermineEngine(
     }
 
     if (step.kind === "slice") {
-      const hasNegative =
-        (step.start !== undefined && step.start < 0) ||
-        (step.end !== undefined && step.end < 0);
-      if (hasNegative || hasNext || !canAttachToCurrent) {
-        needsStreamingEngine = true;
-      }
+      needsStreamingEngine = true;
       const range = {
         start: step.start !== undefined ? step.start : 0,
-        end: step.end !== undefined ? step.end : 0,
+        ...(step.end !== undefined ? { end: step.end } : {}),
         step: step.step,
       };
       if (canAttachToCurrent) {
@@ -502,6 +494,7 @@ export function buildLegacyAndDetermineEngine(
           (s.kind === "child" ||
             (s.kind === "index" && s.rawIndexes.every((n) => n >= 0)) ||
             (s.kind === "slice" &&
+              s.step > 0 &&
               (s.start === undefined || s.start >= 0) &&
               (s.end === undefined || s.end >= 0)))
       );
@@ -541,18 +534,24 @@ export function buildLegacyAndDetermineEngine(
 function resolveSliceBounds(
   length: number,
   start?: number,
-  end?: number
-): { s: number; e: number } {
-  let s = start === undefined ? 0 : start < 0 ? Math.max(0, length + start) : start;
-  let e: number;
-  if (end === undefined || end === 0) {
-    e = length;
-  } else if (end < 0) {
-    e = Math.max(0, length + end);
-  } else {
-    e = Math.min(length, end);
+  end?: number,
+  step = 1
+): { lower: number; upper: number } {
+  const nStart = start !== undefined ? start : step >= 0 ? 0 : length - 1;
+  const nEnd = end !== undefined ? end : step >= 0 ? length : -length - 1;
+  const normStart = nStart >= 0 ? nStart : length + nStart;
+  const normEnd = nEnd >= 0 ? nEnd : length + nEnd;
+
+  if (step >= 0) {
+    return {
+      lower: Math.min(Math.max(normStart, 0), length),
+      upper: Math.min(Math.max(normEnd, 0), length),
+    };
   }
-  return { s, e };
+  return {
+    upper: Math.min(Math.max(normStart, -1), length - 1),
+    lower: Math.min(Math.max(normEnd, -1), length - 1),
+  };
 }
 
 export function evaluateStepsOnValue(
@@ -661,10 +660,21 @@ function evaluateSingleStepOnValue(
       break;
     }
     case "slice": {
-      if (Array.isArray(val)) {
-        const { s, e } = resolveSliceBounds(val.length, step.start, step.end);
-        for (let i = s; i < e; i += step.step) {
-          results.push(...evaluateStepsOnValue(val[i], steps, nextIndex, rootValue));
+      if (Array.isArray(val) && step.step !== 0) {
+        const { lower, upper } = resolveSliceBounds(
+          val.length,
+          step.start,
+          step.end,
+          step.step
+        );
+        if (step.step > 0) {
+          for (let i = lower; i < upper; i += step.step) {
+            results.push(...evaluateStepsOnValue(val[i], steps, nextIndex, rootValue));
+          }
+        } else {
+          for (let i = upper; i > lower; i += step.step) {
+            results.push(...evaluateStepsOnValue(val[i], steps, nextIndex, rootValue));
+          }
         }
       }
       break;
@@ -1221,6 +1231,7 @@ interface ActiveArrayCollector {
   nextStepIndex: number;
   depth: number;
   tailKeep: number | null;
+  maxCollectIndex: number | null;
   totalCount: number;
   elements: string[];
   currentElementCollector: JsonValueCollector | null;
@@ -1270,11 +1281,14 @@ export class StreamingPathEngine implements SaxHandler {
       if (!s0.recursive) {
         if (s0.kind === "index" && !s0.rawIndexes.some((n) => n < 0)) {
           this.rootMaxIndex = Math.max(...s0.rawIndexes);
+        } else if (s0.kind === "slice" && s0.step === 0) {
+          this.rootMaxIndex = -1;
         } else if (
           s0.kind === "slice" &&
+          s0.step > 0 &&
           (s0.start === undefined || s0.start >= 0) &&
           s0.end !== undefined &&
-          s0.end > 0
+          s0.end >= 0
         ) {
           this.rootMaxIndex = s0.end - 1;
         } else if (
@@ -1469,15 +1483,26 @@ export class StreamingPathEngine implements SaxHandler {
     step: JsonPathStep
   ) {
     let tailKeep: number | null = null;
+    let maxCollectIndex: number | null = null;
     if (step.kind === "script" && step.lengthOffset && step.lengthOffset > 0) {
       tailKeep = step.lengthOffset;
-    } else if (
-      step.kind === "slice" &&
-      step.start !== undefined &&
-      step.start < 0 &&
-      (step.end === undefined || step.end === 0)
-    ) {
-      tailKeep = -step.start;
+    } else if (step.kind === "slice") {
+      if (
+        step.step > 0 &&
+        step.start !== undefined &&
+        step.start < 0 &&
+        step.end === undefined
+      ) {
+        tailKeep = -step.start;
+      } else if (step.step < 0 && step.end !== undefined && step.end < 0) {
+        tailKeep = Math.max(0, -step.end - 1);
+      } else if (
+        step.step < 0 &&
+        step.start !== undefined &&
+        step.start >= 0
+      ) {
+        maxCollectIndex = step.start;
+      }
     }
     const slot = this.createSlot(false);
     frame.arrayCollectors.push({
@@ -1487,6 +1512,7 @@ export class StreamingPathEngine implements SaxHandler {
       nextStepIndex: stepIndex + 1,
       depth: frame.depth,
       tailKeep,
+      maxCollectIndex,
       totalCount: 0,
       elements: [],
       currentElementCollector: null,
@@ -1523,10 +1549,21 @@ export class StreamingPathEngine implements SaxHandler {
           matchedIndexes.push(i);
         }
       }
-    } else if (ac.step.kind === "slice") {
-      const { s, e } = resolveSliceBounds(length, ac.step.start, ac.step.end);
-      for (let i = s; i < e; i += ac.step.step) {
-        matchedIndexes.push(i);
+    } else if (ac.step.kind === "slice" && ac.step.step !== 0) {
+      const { lower, upper } = resolveSliceBounds(
+        length,
+        ac.step.start,
+        ac.step.end,
+        ac.step.step
+      );
+      if (ac.step.step > 0) {
+        for (let i = lower; i < upper; i += ac.step.step) {
+          matchedIndexes.push(i);
+        }
+      } else {
+        for (let i = upper; i > lower; i += ac.step.step) {
+          matchedIndexes.push(i);
+        }
       }
     }
 
@@ -1558,6 +1595,9 @@ export class StreamingPathEngine implements SaxHandler {
   private pushCollectedElement(ac: ActiveArrayCollector, rawEl: string) {
     ac.totalCount++;
     if (ac.tailKeep !== null) {
+      if (ac.tailKeep === 0) {
+        return;
+      }
       if (ac.elements.length >= ac.tailKeep) {
         ac.elements.shift();
       }
@@ -1618,7 +1658,12 @@ export class StreamingPathEngine implements SaxHandler {
     const frameCols = frame.arrayCollectors;
     for (let i = 0; i < frameCols.length; i++) {
       const ac = frameCols[i];
-      if (isScalar && scalarNode !== undefined) {
+      if (
+        ac.tailKeep === 0 ||
+        (ac.maxCollectIndex !== null && idx > ac.maxCollectIndex)
+      ) {
+        ac.totalCount++;
+      } else if (isScalar && scalarNode !== undefined) {
         this.pushCollectedElement(ac, scalarNode);
       } else {
         ac.currentElementCollector = new JsonValueCollector();
@@ -1638,14 +1683,14 @@ export class StreamingPathEngine implements SaxHandler {
         }
       } else if (step.kind === "slice") {
         const hasNeg =
+          step.step <= 0 ||
           (step.start !== undefined && step.start < 0) ||
           (step.end !== undefined && step.end < 0);
         if (!hasNeg) {
           const start = step.start !== undefined ? step.start : 0;
-          const end = step.end !== undefined ? step.end : 0;
           if (
             idx >= start &&
-            (end <= 0 || idx < end) &&
+            (step.end === undefined || idx < step.end) &&
             (idx - start) % step.step === 0
           ) {
             matched = true;
@@ -1813,6 +1858,7 @@ export class StreamingPathEngine implements SaxHandler {
       if (this.skipDecode && this.activeFilters.length === 0) {
         if (this.skipDepth === 0) {
           this.updateSkipDecode();
+          this.checkEarlyExit();
         }
         return;
       }
@@ -1981,7 +2027,9 @@ export class StreamingPathEngine implements SaxHandler {
         (step.kind === "script" && step.staticIndex === undefined) ||
         (step.kind === "index" && step.rawIndexes.some((n) => n < 0)) ||
         (step.kind === "slice" &&
-          ((step.start !== undefined && step.start < 0) ||
+          step.step !== 0 &&
+          (step.step < 0 ||
+            (step.start !== undefined && step.start < 0) ||
             (step.end !== undefined && step.end < 0)));
       if (needsArrayCollector) {
         this.createArrayCollectorForFrame(frame, stepIdx, step);
@@ -1995,6 +2043,7 @@ export class StreamingPathEngine implements SaxHandler {
       if (this.skipDecode && this.activeFilters.length === 0) {
         if (this.skipDepth === 0) {
           this.updateSkipDecode();
+          this.checkEarlyExit();
         }
         return;
       }

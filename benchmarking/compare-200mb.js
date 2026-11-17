@@ -364,6 +364,28 @@ async function main() {
       jpp: null,
       runs: 2,
     },
+    {
+      name: "10. Array slice early-exit ($[0:10:2])",
+      piffero: "$[0:10:2]",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: null,
+      sp: null,
+      jpp: "$[0:10:2]",
+      runs: 3,
+    },
+    {
+      name: "11. Reverse slice ($[10:0:-1])",
+      piffero: "$[10:0:-1]",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: null,
+      sp: null,
+      jpp: "$[10:0:-1]",
+      runs: 2,
+    },
   ];
 
   for (const c of cases) {

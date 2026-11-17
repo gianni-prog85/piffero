@@ -130,14 +130,18 @@ export class PifferoStatus {
       return this.path.indexes.has(this.currentIndex);
     }
     const range = this.path.range;
-    const start = range.start >= 0 ? range.start : 0;
+    const start =
+      range.start !== undefined && range.start >= 0 ? range.start : 0;
     if (this.currentIndex < start) {
       return false;
     }
-    if (range.end > 0 && this.currentIndex >= range.end) {
+    if (range.end !== undefined && this.currentIndex >= range.end) {
       return false;
     }
-    const step = range.step > 0 ? range.step : 1;
+    if (range.step !== undefined && range.step <= 0) {
+      return false;
+    }
+    const step = range.step !== undefined ? range.step : 1;
     return (this.currentIndex - start) % step === 0;
   }
 }
@@ -465,9 +469,16 @@ function extractFromParsed(obj: any, path: ParsedPath): any[] {
       if (path.indexes && path.indexes.size > 0) {
         ok = path.indexes.has(i);
       } else if (path.range) {
-        const start = path.range.start >= 0 ? path.range.start : 0;
-        const step = path.range.step > 0 ? path.range.step : 1;
-        ok = i >= start && (path.range.end <= 0 || i < path.range.end) && (i - start) % step === 0;
+        const start =
+          path.range.start !== undefined && path.range.start >= 0
+            ? path.range.start
+            : 0;
+        const step = path.range.step !== undefined ? path.range.step : 1;
+        ok =
+          step > 0 &&
+          i >= start &&
+          (path.range.end === undefined || i < path.range.end) &&
+          (i - start) % step === 0;
       }
       if (ok) {
         if (path.next) {

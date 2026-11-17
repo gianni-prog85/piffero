@@ -353,7 +353,6 @@ describe("JSONPath complete features", function () {
         "$.a[?()]",
         "$.a[()]",
         "$.a[?(@.x === )]",
-        "$.a[1:2:0]",
       ];
       for (const p of invalidPaths) {
         expect(() => parse(p)).toThrowError(PifferoJsonPathError);
@@ -420,6 +419,51 @@ describe("JSONPath complete features", function () {
         "$.scores[-1]"
       );
       expect(JSON.parse(negIdx)).toEqual([15]);
+    });
+
+    it("should support RFC 9535 array slice semantics (step < 0, step === 0, end === 0)", async function () {
+      const arr = ["a", "b", "c", "d", "e", "f", "g"];
+
+      // RFC 9535 §2.3.4.3 examples
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[1:3]"))).toEqual(["b", "c"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[5:]"))).toEqual(["f", "g"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[1:5:2]"))).toEqual(["b", "d"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[5:1:-2]"))).toEqual(["f", "d"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[::-1]"))).toEqual(["g", "f", "e", "d", "c", "b", "a"]);
+
+      // end === 0 must mean index 0 (empty for [0:0], reverse up to index 1 for [5:0:-2])
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[0:0]"))).toEqual([]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream({ arr }), "$.arr[0:0]"))).toEqual([]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream({ arr }), "$.arr[-2:0]"))).toEqual([]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[5:0:-2]"))).toEqual(["f", "d", "b"]);
+
+      // step === 0 returns empty nodelist without throwing
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[1:5:0]"))).toEqual([]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream({ arr }), "$.arr[0:5:0]"))).toEqual([]);
+
+      // Negative end / start with negative step (including tailKeep ring buffer)
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[:-4:-1]"))).toEqual(["g", "f", "e"]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[:-1:-1]"))).toEqual([]);
+      expect(JSON.parse(await Piffero.findAsPromise(makeStream(arr), "$[-3::-1]"))).toEqual(["e", "d", "c", "b", "a"]);
+
+      // Nested object array with reverse slice + property projection + stream mode
+      const revNames = await streamToString(
+        Piffero.findByPath(makeStream(sampleEmployees), "$.employees[::-1].name")
+      );
+      expect(JSON.parse(revNames)).toEqual(["Anna", "Joe", "John"]);
+
+      // Slice after filter (evaluated in-memory by evaluateStepsOnValue)
+      const postFilterSlice = await Piffero.findAsPromise(
+        makeStream({ items: [{ ok: true, tags: ["x", "y", "z"] }] }),
+        "$.items[?(@.ok === true)].tags[::-1]"
+      );
+      expect(JSON.parse(postFilterSlice)).toEqual(["z", "y", "x"]);
+
+      const postFilterZeroEnd = await Piffero.findAsPromise(
+        makeStream({ items: [{ ok: true, tags: ["x", "y", "z"] }] }),
+        "$.items[?(@.ok === true)].tags[0:0]"
+      );
+      expect(JSON.parse(postFilterZeroEnd)).toEqual([]);
     });
 
     it("should flush StreamingPathEngine output cleanly across >4KB threshold", async function () {
