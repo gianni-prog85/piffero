@@ -140,15 +140,31 @@ function runStreamJson(filter, useStreamArray = false, once = false) {
   });
 }
 
-async function runJsonWebStreams(jsonPath) {
+async function runJsonWebStreams(jsonPath, earlyStop = false) {
   const start = performance.now();
   let count = 0;
-  const webStream = Readable.toWeb(fs.createReadStream(OUT_FILE))
+  const paths = Array.isArray(jsonPath) ? jsonPath : [jsonPath];
+  const input = fs.createReadStream(OUT_FILE);
+  const webStream = Readable.toWeb(input)
     .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new JSONParseStream([jsonPath]));
+    .pipeThrough(new JSONParseStream(paths));
 
-  for await (const _item of webStream) {
-    count++;
+  const reader = webStream.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value !== undefined) {
+        count++;
+        if (earlyStop) {
+          await reader.cancel();
+          input.destroy();
+          break;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
   }
   return { ms: performance.now() - start, count };
 }
@@ -157,20 +173,32 @@ function runOboe(oboePattern, abortOnFirst) {
   return new Promise((resolve, reject) => {
     const start = performance.now();
     let count = 0;
+    let settled = false;
+    const patterns = Array.isArray(oboePattern) ? oboePattern : [oboePattern];
     const inst = oboe(fs.createReadStream(OUT_FILE));
-    inst.node(oboePattern, function () {
+    const onMatch = function () {
       count++;
-      if (abortOnFirst) {
+      if (abortOnFirst && !settled) {
+        settled = true;
         this.abort();
         resolve({ ms: performance.now() - start, count });
       }
-    });
+    };
+    for (const pattern of patterns) {
+      inst.node(pattern, onMatch);
+    }
     inst.done(() => {
-      if (!abortOnFirst) {
+      if (!abortOnFirst && !settled) {
+        settled = true;
         resolve({ ms: performance.now() - start, count });
       }
     });
-    inst.fail((err) => reject(err));
+    inst.fail((err) => {
+      if (!settled) {
+        settled = true;
+        reject(err);
+      }
+    });
   });
 }
 
@@ -231,10 +259,35 @@ async function bench(label, fn, runs) {
   await fn();
   const times = [];
   let count = 0;
+  let maxHeap = 0;
+  let maxRss = 0;
   for (let i = 0; i < runs; i++) {
-    const r = await fn();
-    times.push(r.ms);
-    count = r.count;
+    if (typeof global.gc === "function") {
+      global.gc();
+    }
+    const startMem = process.memoryUsage();
+    let runPeakHeap = startMem.heapUsed;
+    let runPeakRss = startMem.rss;
+    const sampler = setInterval(() => {
+      const m = process.memoryUsage();
+      if (m.heapUsed > runPeakHeap) runPeakHeap = m.heapUsed;
+      if (m.rss > runPeakRss) runPeakRss = m.rss;
+    }, 10);
+    if (typeof sampler.unref === "function") {
+      sampler.unref();
+    }
+    try {
+      const r = await fn();
+      times.push(r.ms);
+      count = r.count;
+    } finally {
+      clearInterval(sampler);
+      const endMem = process.memoryUsage();
+      if (endMem.heapUsed > runPeakHeap) runPeakHeap = endMem.heapUsed;
+      if (endMem.rss > runPeakRss) runPeakRss = endMem.rss;
+    }
+    if (runPeakHeap > maxHeap) maxHeap = runPeakHeap;
+    if (runPeakRss > maxRss) maxRss = runPeakRss;
   }
   times.sort((a, b) => a - b);
   const avg = times.reduce((a, b) => a + b, 0) / times.length;
@@ -244,6 +297,8 @@ async function bench(label, fn, runs) {
     avgMs: Number(avg.toFixed(2)),
     medianMs: Number(median.toFixed(2)),
     opsSec: Number((1000 / avg).toFixed(2)),
+    peakHeapMb: Number((maxHeap / (1024 * 1024)).toFixed(2)),
+    peakRssMb: Number((maxRss / (1024 * 1024)).toFixed(2)),
     matches: count,
   };
 }
@@ -254,6 +309,8 @@ function na(label) {
     avgMs: "N/A",
     medianMs: "N/A",
     opsSec: "N/A",
+    peakHeapMb: "N/A",
+    peakRssMb: "N/A",
     matches: "N/A (unsupported)",
   };
 }
@@ -349,10 +406,10 @@ async function main() {
       name: "8. Existence filter ($[?(@.payload.issue)].payload.issue.number)",
       piffero: "$[?(@.payload.issue)].payload.issue.number",
       sapient: null,
-      sj: null,
+      sj: { filter: /^\d+\.payload\.issue\.number$/, useArray: false, once: false },
       jws: null,
       oboe: { pattern: "![*].payload{issue}.issue.number", abort: false },
-      sp: null,
+      sp: { paths: ["$.*.payload.issue.number"], abort: false },
       jpp: "$[?(@.payload.issue)].payload.issue.number",
       runs: 2,
     },
@@ -427,8 +484,8 @@ async function main() {
       piffero: "$[*]['type','id']",
       sapient: { path: ["$[*].type", "$[*].id"], earlyStop: false },
       sj: { filter: /^\d+\.(type|id)$/, useArray: false, once: false },
-      jws: null,
-      oboe: null,
+      jws: { paths: ["$[*].type", "$[*].id"], earlyStop: false },
+      oboe: { pattern: ["![*].type", "![*].id"], abort: false },
       sp: { paths: ["$.*.type", "$.*.id"], abort: false },
       jpp: "$[*]['type','id']",
       runs: 2,
@@ -460,7 +517,14 @@ async function main() {
     );
     rows.push(
       c.jws
-        ? await bench("json-web-streams", () => runJsonWebStreams(c.jws), c.runs)
+        ? await bench(
+            "json-web-streams",
+            () =>
+              typeof c.jws === "string"
+                ? runJsonWebStreams(c.jws)
+                : runJsonWebStreams(c.jws.paths, c.jws.earlyStop),
+            c.runs
+          )
         : na("json-web-streams")
     );
     rows.push(
