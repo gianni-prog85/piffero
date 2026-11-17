@@ -846,6 +846,28 @@ function evaluateSingleStepOnValue(
   return results;
 }
 
+function collectNestedFilterAsts(steps: JsonPathStep[], out: ExprNode[]) {
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    if (st.kind === "filter" || st.kind === "script") {
+      out.push(st.ast);
+    } else if (st.kind === "union") {
+      for (let s = 0; s < st.selectors.length; s++) {
+        const sel = st.selectors[s];
+        if (sel.kind === "filter" || sel.kind === "script") {
+          out.push(sel.ast);
+        }
+      }
+    }
+  }
+}
+
+ConditionEval.registerQueryHooks({
+  compileQuery: tokenizeJsonPath,
+  evaluateSteps: evaluateStepsOnValue,
+  collectNestedFilterAsts,
+});
+
 // ---------- Streaming SAX JSONPath Engine ----------
 
 interface CaptureStackEntry {
@@ -1008,6 +1030,30 @@ function extractCurrentMemberChain(node: ExprNode): string[] | null {
   return null;
 }
 
+function extractRootMemberChain(node: ExprNode): string[] | null {
+  if (node.type === "root") {
+    return [];
+  }
+  if (node.type === "member") {
+    const base = extractRootMemberChain(node.object);
+    if (base !== null) {
+      base.push(node.property);
+      return base;
+    }
+  } else if (
+    node.type === "index" &&
+    node.index.type === "literal" &&
+    typeof node.index.value === "string"
+  ) {
+    const base = extractRootMemberChain(node.object);
+    if (base !== null) {
+      base.push(node.index.value);
+      return base;
+    }
+  }
+  return null;
+}
+
 function collectExprProjection(
   node: ExprNode,
   root: FilterProjectionNode,
@@ -1016,10 +1062,12 @@ function collectExprProjection(
   switch (node.type) {
     case "literal":
     case "identifier":
+    case "root":
       return true;
     case "current":
-    case "root":
       return false;
+    case "query":
+      return node.isRoot;
     case "member": {
       const chain = extractCurrentMemberChain(node);
       if (chain !== null) {
@@ -1031,6 +1079,9 @@ function collectExprProjection(
         } else {
           markProjectionPath(root, chain, truthinessContext);
         }
+        return true;
+      }
+      if (extractRootMemberChain(node) !== null) {
         return true;
       }
       return collectExprProjection(node.object, root, false);
@@ -1049,6 +1100,9 @@ function collectExprProjection(
       if (objChain !== null) {
         if (objChain.length === 0) return false;
         markProjectionPath(root, objChain, false);
+        return true;
+      }
+      if (extractRootMemberChain(node) !== null) {
         return true;
       }
       return collectExprProjection(node.object, root, false);
@@ -1070,6 +1124,119 @@ function collectExprProjection(
         collectExprProjection(node.right, root, false)
       );
   }
+}
+
+function collectRootProjection(
+  node: ExprNode,
+  rootProj: FilterProjectionNode,
+  truthinessContext: boolean
+): boolean {
+  if (!ConditionEval.usesRoot(node)) {
+    return true;
+  }
+  switch (node.type) {
+    case "literal":
+    case "identifier":
+    case "current":
+      return true;
+    case "root":
+      return false;
+    case "query": {
+      if (node.isRoot) {
+        const steps = node.steps as JsonPathStep[];
+        const staticPrefix: string[] = [];
+        for (let i = 0; i < steps.length; i++) {
+          const st = steps[i];
+          if (!st.recursive && st.kind === "child") {
+            staticPrefix.push(st.key);
+          } else {
+            break;
+          }
+        }
+        if (staticPrefix.length === 0) {
+          return false;
+        }
+        markProjectionPath(rootProj, staticPrefix, false);
+      }
+      const nested: ExprNode[] = [];
+      collectNestedFilterAsts(node.steps as JsonPathStep[], nested);
+      for (let i = 0; i < nested.length; i++) {
+        if (!collectRootProjection(nested[i], rootProj, true)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    case "member": {
+      const chain = extractRootMemberChain(node);
+      if (chain !== null) {
+        if (chain.length === 0) return false;
+        if (chain[chain.length - 1] === "length") {
+          if (chain.length === 1) return false;
+          markProjectionPath(rootProj, chain.slice(0, -1), false);
+        } else {
+          markProjectionPath(rootProj, chain, truthinessContext);
+        }
+        return true;
+      }
+      return collectRootProjection(node.object, rootProj, false);
+    }
+    case "index": {
+      if (!collectRootProjection(node.index, rootProj, false)) {
+        return false;
+      }
+      const chain = extractRootMemberChain(node);
+      if (chain !== null) {
+        if (chain.length === 0) return false;
+        markProjectionPath(rootProj, chain, truthinessContext);
+        return true;
+      }
+      const objChain = extractRootMemberChain(node.object);
+      if (objChain !== null) {
+        if (objChain.length === 0) return false;
+        markProjectionPath(rootProj, objChain, false);
+        return true;
+      }
+      return collectRootProjection(node.object, rootProj, false);
+    }
+    case "unary":
+      return collectRootProjection(
+        node.argument,
+        rootProj,
+        node.op === "!" ? true : false
+      );
+    case "logical":
+      return (
+        collectRootProjection(node.left, rootProj, truthinessContext) &&
+        collectRootProjection(node.right, rootProj, truthinessContext)
+      );
+    case "binary":
+      return (
+        collectRootProjection(node.left, rootProj, false) &&
+        collectRootProjection(node.right, rootProj, false)
+      );
+  }
+}
+
+function buildRootProjection(
+  steps: JsonPathStep[]
+): FilterProjectionNode | null {
+  const rootProj = createProjectionNode();
+  const asts: ExprNode[] = [];
+  collectNestedFilterAsts(steps, asts);
+  let hasRootExpr = false;
+  for (let i = 0; i < asts.length; i++) {
+    if (ConditionEval.usesRoot(asts[i])) {
+      hasRootExpr = true;
+      if (!collectRootProjection(asts[i], rootProj, true)) {
+        return null;
+      }
+    }
+  }
+  if (!hasRootExpr || rootProj.children.size === 0) {
+    return null;
+  }
+  return rootProj;
 }
 
 function buildFilterProjection(
@@ -1420,6 +1587,26 @@ function getSelectorMaxPositiveIndex(step: JsonPathStep): number | null {
   return null;
 }
 
+type DeferredRootItem =
+  | {
+      kind: "filter";
+      flt: ActiveFilter;
+      parsed: any;
+      raw?: string;
+    }
+  | {
+      kind: "scalarFilter";
+      slot: PendingSlot;
+      step: Extract<JsonPathStep, { kind: "filter" }>;
+      nextStepIndex: number;
+      parsed: any;
+      raw: string;
+    }
+  | {
+      kind: "arrayCollector";
+      ac: ActiveArrayCollector;
+    };
+
 export class StreamingPathEngine implements SaxHandler {
   private frameStack: Frame[] = [];
   private pendingSlots: PendingSlot[] = [];
@@ -1435,6 +1622,12 @@ export class StreamingPathEngine implements SaxHandler {
   >();
   private rootMaxIndex: number | null = null;
   private earlyExited = false;
+  private needsRootValue = false;
+  private rootReady = false;
+  private rootValue: any = undefined;
+  private rootBuilder: PrunedJsBuilder | null = null;
+  private rootCollector: JsonValueCollector | null = null;
+  private deferredRootFilters: DeferredRootItem[] = [];
 
   skipDecode = false;
   onend: () => void = () => {};
@@ -1448,6 +1641,15 @@ export class StreamingPathEngine implements SaxHandler {
   ) {
     if (steps.length > 0) {
       this.rootPendingBranches = [{ stepIdx: 0 }];
+      this.needsRootValue = this.collectStepsRootUsage(steps);
+      if (this.needsRootValue) {
+        const rootProj = buildRootProjection(steps);
+        if (rootProj) {
+          this.rootBuilder = new PrunedJsBuilder(rootProj);
+        } else {
+          this.rootCollector = new JsonValueCollector();
+        }
+      }
       const s0 = steps[0];
       if (!s0.recursive) {
         if (s0.kind === "union") {
@@ -1493,7 +1695,179 @@ export class StreamingPathEngine implements SaxHandler {
     }
   }
 
+  private collectStepsRootUsage(steps: JsonPathStep[]): boolean {
+    const asts: ExprNode[] = [];
+    collectNestedFilterAsts(steps, asts);
+    for (let i = 0; i < asts.length; i++) {
+      if (ConditionEval.usesRoot(asts[i])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private completeRootCapture() {
+    if (this.rootBuilder) {
+      this.rootValue = this.rootBuilder.result;
+      this.rootBuilder = null;
+    } else if (this.rootCollector) {
+      const raw = this.rootCollector.chunks.join("");
+      try {
+        this.rootValue = JSON.parse(raw);
+      } catch {
+        this.rootValue = undefined;
+      }
+      this.rootCollector = null;
+    }
+    this.rootReady = true;
+    this.flushDeferredRootFilters();
+  }
+
+  private feedRootOpenObject(keyNode?: string) {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.openObject(keyNode);
+    } else if (this.rootCollector) {
+      this.rootCollector.openObject(keyNode);
+    }
+  }
+
+  private feedRootCloseObject() {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.closeObject();
+      if (this.rootBuilder.done) {
+        this.completeRootCapture();
+      }
+    } else if (this.rootCollector) {
+      this.rootCollector.closeObject();
+      if (this.rootCollector.done) {
+        this.completeRootCapture();
+      }
+    }
+  }
+
+  private feedRootOpenArray() {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.openArray();
+    } else if (this.rootCollector) {
+      this.rootCollector.openArray();
+    }
+  }
+
+  private feedRootCloseArray() {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.closeArray();
+      if (this.rootBuilder.done) {
+        this.completeRootCapture();
+      }
+    } else if (this.rootCollector) {
+      this.rootCollector.closeArray();
+      if (this.rootCollector.done) {
+        this.completeRootCapture();
+      }
+    }
+  }
+
+  private feedRootKey(keyNode: string) {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.key(keyNode);
+    } else if (this.rootCollector) {
+      this.rootCollector.key(keyNode);
+    }
+  }
+
+  private feedRootValue(valNode: string) {
+    if (!this.needsRootValue || this.rootReady) {
+      return;
+    }
+    if (this.rootBuilder) {
+      this.rootBuilder.value(valNode);
+      if (this.rootBuilder.done) {
+        this.completeRootCapture();
+      }
+    } else if (this.rootCollector) {
+      this.rootCollector.value(valNode);
+      if (this.rootCollector.done) {
+        this.completeRootCapture();
+      }
+    }
+  }
+
+  private flushDeferredRootFilters() {
+    if (this.deferredRootFilters.length === 0) {
+      return;
+    }
+    const items = this.deferredRootFilters;
+    this.deferredRootFilters = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "filter") {
+        this.applyFilterEvaluation(item.flt, item.parsed, item.raw);
+      } else if (item.kind === "scalarFilter") {
+        if (ConditionEval.evalFilterAst(item.step.ast, item.parsed, this.rootValue)) {
+          if (item.nextStepIndex >= this.steps.length) {
+            item.slot.results.push(item.raw);
+          } else {
+            const matched = evaluateStepsOnValue(
+              item.parsed,
+              this.steps,
+              item.nextStepIndex,
+              this.rootValue
+            );
+            for (let k = 0; k < matched.length; k++) {
+              item.slot.results.push(JSON.stringify(matched[k]));
+            }
+          }
+        }
+        item.slot.done = true;
+      } else {
+        this.applyArrayCollectorEvaluation(item.ac);
+      }
+    }
+  }
+
   private updateSkipDecode() {
+    if (this.needsRootValue && !this.rootReady) {
+      if (this.rootCollector) {
+        this.skipDecode = false;
+        return;
+      }
+      if (
+        this.rootBuilder &&
+        this.activeCaptures.length === 0 &&
+        this.activeElCollectors.length === 0 &&
+        this.skipDepth > 0 &&
+        this.rootBuilder.isSkipping()
+      ) {
+        let allSkipping = true;
+        for (let i = 0; i < this.activeFilters.length; i++) {
+          const b = this.activeFilters[i].builder;
+          if (!b || !b.isSkipping()) {
+            allSkipping = false;
+            break;
+          }
+        }
+        this.skipDecode = allSkipping;
+        return;
+      }
+      this.skipDecode = false;
+      return;
+    }
+
     if (
       this.activeCaptures.length === 0 &&
       this.activeElCollectors.length === 0
@@ -1528,6 +1902,9 @@ export class StreamingPathEngine implements SaxHandler {
   }
 
   private checkEarlyExit() {
+    if (this.needsRootValue && !this.rootReady) {
+      return;
+    }
     if (
       !this.earlyExited &&
       this.rootMaxIndex !== null &&
@@ -1657,20 +2034,33 @@ export class StreamingPathEngine implements SaxHandler {
     }
   }
 
-  private finalizeFilter(flt: ActiveFilter) {
-    if (flt.builder) {
-      const parsed = flt.builder.result;
-      if (ConditionEval.evalFilterAst(flt.step.ast, parsed)) {
+  private applyFilterEvaluation(flt: ActiveFilter, parsed: any, raw?: string) {
+    if (ConditionEval.evalFilterAst(flt.step.ast, parsed, this.rootValue)) {
+      if (flt.nextStepIndex >= this.steps.length && raw !== undefined) {
+        flt.slot.results.push(raw);
+      } else {
         const matched = evaluateStepsOnValue(
           parsed,
           this.steps,
-          flt.nextStepIndex
+          flt.nextStepIndex,
+          this.rootValue
         );
         for (let i = 0; i < matched.length; i++) {
           flt.slot.results.push(JSON.stringify(matched[i]));
         }
       }
-      flt.slot.done = true;
+    }
+    flt.slot.done = true;
+  }
+
+  private finalizeFilter(flt: ActiveFilter) {
+    if (flt.builder) {
+      const parsed = flt.builder.result;
+      if (this.needsRootValue && !this.rootReady) {
+        this.deferredRootFilters.push({ kind: "filter", flt, parsed });
+        return;
+      }
+      this.applyFilterEvaluation(flt, parsed);
       return;
     }
 
@@ -1681,21 +2071,11 @@ export class StreamingPathEngine implements SaxHandler {
     } catch {
       parsed = undefined;
     }
-    if (ConditionEval.evalFilterAst(flt.step.ast, parsed)) {
-      if (flt.nextStepIndex >= this.steps.length) {
-        flt.slot.results.push(raw);
-      } else {
-        const matched = evaluateStepsOnValue(
-          parsed,
-          this.steps,
-          flt.nextStepIndex
-        );
-        for (let i = 0; i < matched.length; i++) {
-          flt.slot.results.push(JSON.stringify(matched[i]));
-        }
-      }
+    if (this.needsRootValue && !this.rootReady) {
+      this.deferredRootFilters.push({ kind: "filter", flt, parsed, raw });
+      return;
     }
-    flt.slot.done = true;
+    this.applyFilterEvaluation(flt, parsed, raw);
   }
 
   private selectorNeedsArrayCollector(step: JsonPathStep): boolean {
@@ -1752,7 +2132,7 @@ export class StreamingPathEngine implements SaxHandler {
     });
   }
 
-  private finalizeArrayCollector(ac: ActiveArrayCollector) {
+  private applyArrayCollectorEvaluation(ac: ActiveArrayCollector) {
     const length = ac.totalCount;
     const matchedIndexes: number[] = [];
 
@@ -1760,7 +2140,7 @@ export class StreamingPathEngine implements SaxHandler {
       const idx =
         ac.step.staticIndex !== undefined
           ? ac.step.staticIndex
-          : ConditionEval.evalAst(ac.step.ast, { length });
+          : ConditionEval.evalAst(ac.step.ast, { length }, this.rootValue);
       if (
         typeof idx === "number" &&
         Number.isInteger(idx) &&
@@ -1810,7 +2190,8 @@ export class StreamingPathEngine implements SaxHandler {
         const sub = evaluateStepsOnValue(
           parsedEl,
           this.steps,
-          ac.nextStepIndex
+          ac.nextStepIndex,
+          this.rootValue
         );
         for (let j = 0; j < sub.length; j++) {
           ac.slot.results.push(JSON.stringify(sub[j]));
@@ -1818,6 +2199,14 @@ export class StreamingPathEngine implements SaxHandler {
       }
     }
     ac.slot.done = true;
+  }
+
+  private finalizeArrayCollector(ac: ActiveArrayCollector) {
+    if (this.needsRootValue && !this.rootReady) {
+      this.deferredRootFilters.push({ kind: "arrayCollector", ac });
+      return;
+    }
+    this.applyArrayCollectorEvaluation(ac);
   }
 
   private pushCollectedElement(ac: ActiveArrayCollector, rawEl: string) {
@@ -2020,11 +2409,26 @@ export class StreamingPathEngine implements SaxHandler {
             } catch {
               parsed = undefined;
             }
-            if (ConditionEval.evalFilterAst(sel.ast, parsed)) {
+            if (this.needsRootValue && !this.rootReady) {
+              const subSlot = this.createSlot(false, slot);
+              this.deferredRootFilters.push({
+                kind: "scalarFilter",
+                slot: subSlot,
+                step: sel,
+                nextStepIndex: nextIdx,
+                parsed,
+                raw: scalarNode,
+              });
+            } else if (ConditionEval.evalFilterAst(sel.ast, parsed, this.rootValue)) {
               if (nextIdx >= this.steps.length) {
                 slot.results.push(scalarNode);
               } else {
-                const sub = evaluateStepsOnValue(parsed, this.steps, nextIdx);
+                const sub = evaluateStepsOnValue(
+                  parsed,
+                  this.steps,
+                  nextIdx,
+                  this.rootValue
+                );
                 for (let k = 0; k < sub.length; k++) {
                   slot.results.push(JSON.stringify(sub[k]));
                 }
@@ -2088,14 +2492,29 @@ export class StreamingPathEngine implements SaxHandler {
           } catch {
             parsed = undefined;
           }
-          if (ConditionEval.evalFilterAst(step.ast, parsed)) {
+          if (this.needsRootValue && !this.rootReady) {
+            const slot = this.createSlot(false, targetSlot);
+            this.deferredRootFilters.push({
+              kind: "scalarFilter",
+              slot,
+              step,
+              nextStepIndex: stepIdx + 1,
+              parsed,
+              raw: scalarNode,
+            });
+          } else if (ConditionEval.evalFilterAst(step.ast, parsed, this.rootValue)) {
             const nextIdx = stepIdx + 1;
             if (nextIdx >= this.steps.length) {
               const slot = this.createSlot(false, targetSlot);
               slot.results.push(scalarNode);
               slot.done = true;
             } else {
-              const sub = evaluateStepsOnValue(parsed, this.steps, nextIdx);
+              const sub = evaluateStepsOnValue(
+                parsed,
+                this.steps,
+                nextIdx,
+                this.rootValue
+              );
               if (sub.length > 0) {
                 const slot = this.createSlot(false, targetSlot);
                 for (let k = 0; k < sub.length; k++) {
@@ -2138,6 +2557,7 @@ export class StreamingPathEngine implements SaxHandler {
   }
 
   onopenobject(keyNode?: string) {
+    this.feedRootOpenObject(keyNode);
     if (this.skipDepth > 0) {
       if (!this.skipDecode) {
         for (let i = 0; i < this.activeCaptures.length; i++) {
@@ -2153,14 +2573,16 @@ export class StreamingPathEngine implements SaxHandler {
             keyNode
           );
         }
-        if (this.activeFilters.length > 0) {
+        if (this.activeFilters.length > 0 || (this.needsRootValue && !this.rootReady)) {
           this.updateSkipDecode();
         }
-      } else if (this.activeFilters.length > 0) {
+      } else {
         for (let i = 0; i < this.activeFilters.length; i++) {
           this.activeFilters[i].builder?.openObject(keyNode);
         }
-        this.updateSkipDecode();
+        if (this.activeFilters.length > 0 || (this.needsRootValue && !this.rootReady)) {
+          this.updateSkipDecode();
+        }
       }
       this.skipDepth++;
       return;
@@ -2236,6 +2658,10 @@ export class StreamingPathEngine implements SaxHandler {
     if (this.skipDepth > 0) {
       this.skipDepth--;
       if (this.skipDecode && this.activeFilters.length === 0) {
+        this.feedRootCloseObject();
+        if (this.rootReady) {
+          this.flushPendingSlots();
+        }
         if (this.skipDepth === 0) {
           this.updateSkipDecode();
           this.checkEarlyExit();
@@ -2243,6 +2669,7 @@ export class StreamingPathEngine implements SaxHandler {
         return;
       }
       this.advanceCloseObjectOnActive();
+      this.feedRootCloseObject();
       this.updateSkipDecode();
       this.flushPendingSlots();
       this.checkEarlyExit();
@@ -2254,6 +2681,7 @@ export class StreamingPathEngine implements SaxHandler {
     if (closedFrame && closedFrame.unionGroups.length > 0) {
       this.finalizeUnionGroups(closedFrame);
     }
+    this.feedRootCloseObject();
     this.updateSkipDecode();
     this.flushPendingSlots();
     this.checkEarlyExit();
@@ -2319,6 +2747,7 @@ export class StreamingPathEngine implements SaxHandler {
   }
 
   onopenarray() {
+    this.feedRootOpenArray();
     if (this.skipDepth > 0) {
       if (!this.skipDecode) {
         for (let i = 0; i < this.activeCaptures.length; i++) {
@@ -2332,14 +2761,16 @@ export class StreamingPathEngine implements SaxHandler {
         for (let i = 0; i < this.activeElCollectors.length; i++) {
           this.activeElCollectors[i].currentElementCollector?.openArray();
         }
-        if (this.activeFilters.length > 0) {
+        if (this.activeFilters.length > 0 || (this.needsRootValue && !this.rootReady)) {
           this.updateSkipDecode();
         }
-      } else if (this.activeFilters.length > 0) {
+      } else {
         for (let i = 0; i < this.activeFilters.length; i++) {
           this.activeFilters[i].builder?.openArray();
         }
-        this.updateSkipDecode();
+        if (this.activeFilters.length > 0 || (this.needsRootValue && !this.rootReady)) {
+          this.updateSkipDecode();
+        }
       }
       this.skipDepth++;
       return;
@@ -2410,6 +2841,10 @@ export class StreamingPathEngine implements SaxHandler {
     if (this.skipDepth > 0) {
       this.skipDepth--;
       if (this.skipDecode && this.activeFilters.length === 0) {
+        this.feedRootCloseArray();
+        if (this.rootReady) {
+          this.flushPendingSlots();
+        }
         if (this.skipDepth === 0) {
           this.updateSkipDecode();
           this.checkEarlyExit();
@@ -2417,6 +2852,7 @@ export class StreamingPathEngine implements SaxHandler {
         return;
       }
       this.advanceCloseArrayOnActive();
+      this.feedRootCloseArray();
       this.updateSkipDecode();
       this.flushPendingSlots();
       this.checkEarlyExit();
@@ -2437,6 +2873,7 @@ export class StreamingPathEngine implements SaxHandler {
       }
     }
 
+    this.feedRootCloseArray();
     this.updateSkipDecode();
     this.flushPendingSlots();
     this.checkEarlyExit();
@@ -2502,6 +2939,7 @@ export class StreamingPathEngine implements SaxHandler {
   }
 
   onkey(keyNode: string) {
+    this.feedRootKey(keyNode);
     if (this.skipDepth > 0) {
       if (this.skipDecode) {
         return;
@@ -2517,7 +2955,7 @@ export class StreamingPathEngine implements SaxHandler {
       for (let i = 0; i < this.activeElCollectors.length; i++) {
         this.activeElCollectors[i].currentElementCollector?.key(keyNode);
       }
-      if (this.activeFilters.length > 0) {
+      if (this.activeFilters.length > 0 || (this.needsRootValue && !this.rootReady)) {
         this.updateSkipDecode();
       }
       return;
@@ -2544,9 +2982,14 @@ export class StreamingPathEngine implements SaxHandler {
   onvalue(valNode: string) {
     if (this.skipDepth > 0) {
       if (this.skipDecode && this.activeFilters.length === 0) {
+        this.feedRootValue(valNode);
+        if (this.rootReady) {
+          this.flushPendingSlots();
+        }
         return;
       }
       this.advanceValueOnActive(valNode);
+      this.feedRootValue(valNode);
       this.updateSkipDecode();
       this.flushPendingSlots();
       return;
@@ -2561,6 +3004,7 @@ export class StreamingPathEngine implements SaxHandler {
       this.evaluateArrayElementSteps(top, true, valNode);
     }
 
+    this.feedRootValue(valNode);
     this.updateSkipDecode();
     this.flushPendingSlots();
     this.checkEarlyExit();

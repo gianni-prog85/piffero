@@ -1,7 +1,19 @@
+export interface QueryEvaluatorHooks {
+  compileQuery: (jsonPath: string) => any[];
+  evaluateSteps: (
+    val: any,
+    steps: any[],
+    stepIndex: number,
+    rootValue?: any
+  ) => any[];
+  collectNestedFilterAsts?: (steps: any[], out: ExprNode[]) => void;
+}
+
 export type ExprNode =
   | { type: "literal"; value: any }
   | { type: "current" }
   | { type: "root" }
+  | { type: "query"; isRoot: boolean; rawPath: string; steps: any[] }
   | { type: "identifier"; name: string }
   | { type: "member"; object: ExprNode; property: string }
   | { type: "index"; object: ExprNode; index: ExprNode }
@@ -28,8 +40,9 @@ export type ExprNode =
   | { type: "logical"; op: "&&" | "||"; left: ExprNode; right: ExprNode };
 
 interface ExprToken {
-  type: "number" | "string" | "ident" | "op" | "at" | "dollar" | "punct";
+  type: "number" | "string" | "ident" | "op" | "at" | "dollar" | "punct" | "query";
   value: string;
+  isRoot?: boolean;
 }
 
 function hasLoneSurrogate(str: string): boolean {
@@ -173,6 +186,183 @@ function unescapeStringLiteral(raw: string): string {
   return decodeJsonPathStringInner(raw.slice(1, -1), raw[0]);
 }
 
+function isQueryMemberFirst(cp: number): boolean {
+  return (
+    (cp >= 0x41 && cp <= 0x5A) ||
+    (cp >= 0x61 && cp <= 0x7A) ||
+    cp === 0x5F ||
+    (cp >= 0x80 && cp <= 0xD7FF) ||
+    (cp >= 0xE000 && cp <= 0x10FFFF)
+  );
+}
+
+function isQueryMemberChar(cp: number): boolean {
+  return isQueryMemberFirst(cp) || (cp >= 0x30 && cp <= 0x39);
+}
+
+function scanBalancedBracket(expr: string, openIdx: number): number {
+  let depth = 0;
+  let i = openIdx;
+  while (i < expr.length) {
+    const ch = expr[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      i++;
+      let closed = false;
+      while (i < expr.length) {
+        if (expr[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (expr[i] === quote) {
+          i++;
+          closed = true;
+          break;
+        }
+        i++;
+      }
+      if (!closed) {
+        return -1;
+      }
+      continue;
+    }
+    if (ch === "[") {
+      depth++;
+    } else if (ch === "]") {
+      depth--;
+      if (depth === 0) {
+        return i;
+      }
+    }
+    i++;
+  }
+  return -1;
+}
+
+function bracketInnerIsComplex(inner: string): boolean {
+  const trimmed = inner.trim();
+  if (trimmed.startsWith("?") || trimmed === "*") {
+    return true;
+  }
+  let i = 0;
+  let parenDepth = 0;
+  let bracketDepth = 0;
+  while (i < trimmed.length) {
+    const ch = trimmed[i];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      i++;
+      while (i < trimmed.length) {
+        if (trimmed[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (trimmed[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    if (ch === "(") parenDepth++;
+    else if (ch === ")") parenDepth--;
+    else if (ch === "[") bracketDepth++;
+    else if (ch === "]") bracketDepth--;
+    else if (parenDepth === 0 && bracketDepth === 0) {
+      if (ch === "," || ch === ":") {
+        return true;
+      }
+    }
+    i++;
+  }
+  return false;
+}
+
+function tryScanComplexFilterQuery(
+  expr: string,
+  startIdx: number
+): { endIdx: number; rawPath: string } | null {
+  const len = expr.length;
+  let pos = startIdx + 1;
+  let hasComplex = false;
+
+  while (pos < len) {
+    const ch = expr[pos];
+    if (ch === ".") {
+      if (pos + 1 < len && expr[pos + 1] === ".") {
+        // Recursive descent `..`
+        hasComplex = true;
+        pos += 2;
+        if (pos >= len) {
+          // Malformed trailing `..`: capture so compileQuery raises PifferoJsonPathError
+          return { endIdx: pos, rawPath: "$" + expr.slice(startIdx + 1, pos) };
+        }
+        if (expr[pos] === "[") {
+          const closeIdx = scanBalancedBracket(expr, pos);
+          if (closeIdx === -1) {
+            return { endIdx: len, rawPath: "$" + expr.slice(startIdx + 1) };
+          }
+          pos = closeIdx + 1;
+        } else if (expr[pos] === "*") {
+          pos++;
+        } else {
+          const cp = expr.codePointAt(pos);
+          if (cp !== undefined && isQueryMemberFirst(cp)) {
+            pos += cp > 0xFFFF ? 2 : 1;
+            while (pos < len) {
+              const c2 = expr.codePointAt(pos);
+              if (c2 === undefined || !isQueryMemberChar(c2)) break;
+              pos += c2 > 0xFFFF ? 2 : 1;
+            }
+          } else {
+            return { endIdx: pos, rawPath: "$" + expr.slice(startIdx + 1, pos) };
+          }
+        }
+      } else if (pos + 1 < len && expr[pos + 1] === "*") {
+        // Wildcard `.*`
+        hasComplex = true;
+        pos += 2;
+      } else {
+        // Shorthand `.name`
+        const cp = pos + 1 < len ? expr.codePointAt(pos + 1) : undefined;
+        if (cp === undefined || !isQueryMemberFirst(cp)) {
+          break;
+        }
+        pos += 1 + (cp > 0xFFFF ? 2 : 1);
+        while (pos < len) {
+          const c2 = expr.codePointAt(pos);
+          if (c2 === undefined || !isQueryMemberChar(c2)) break;
+          pos += c2 > 0xFFFF ? 2 : 1;
+        }
+      }
+    } else if (ch === "[") {
+      const closeIdx = scanBalancedBracket(expr, pos);
+      if (closeIdx === -1) {
+        if (hasComplex) {
+          return { endIdx: len, rawPath: "$" + expr.slice(startIdx + 1) };
+        }
+        break;
+      }
+      const inner = expr.slice(pos + 1, closeIdx);
+      if (bracketInnerIsComplex(inner)) {
+        hasComplex = true;
+      }
+      pos = closeIdx + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!hasComplex) {
+    return null;
+  }
+  return {
+    endIdx: pos,
+    rawPath: "$" + expr.slice(startIdx + 1, pos),
+  };
+}
+
 function tokenizeExpression(expr: string): ExprToken[] {
   const tokens: ExprToken[] = [];
   let i = 0;
@@ -251,14 +441,34 @@ function tokenizeExpression(expr: string): ExprToken[] {
     }
 
     if (ch === "@") {
-      tokens.push({ type: "at", value: "@" });
-      i++;
+      const scanned = tryScanComplexFilterQuery(expr, i);
+      if (scanned) {
+        tokens.push({
+          type: "query",
+          value: scanned.rawPath,
+          isRoot: false,
+        });
+        i = scanned.endIdx;
+      } else {
+        tokens.push({ type: "at", value: "@" });
+        i++;
+      }
       continue;
     }
 
     if (ch === "$") {
-      tokens.push({ type: "dollar", value: "$" });
-      i++;
+      const scanned = tryScanComplexFilterQuery(expr, i);
+      if (scanned) {
+        tokens.push({
+          type: "query",
+          value: scanned.rawPath,
+          isRoot: true,
+        });
+        i = scanned.endIdx;
+      } else {
+        tokens.push({ type: "dollar", value: "$" });
+        i++;
+      }
       continue;
     }
 
@@ -511,6 +721,17 @@ class ExprParser {
       return { type: "identifier", name: tok.value };
     }
 
+    if (tok.type === "query") {
+      this.consume();
+      const steps = ConditionEval.compileQuerySteps(tok.value);
+      return {
+        type: "query",
+        isRoot: Boolean(tok.isRoot),
+        rawPath: tok.value,
+        steps,
+      };
+    }
+
     throw new Error(
       `Unexpected token '${tok.value}' in expression: ${this.raw}`
     );
@@ -576,6 +797,45 @@ function rfc9535LessThan(a: any, b: any): boolean {
 
 export class ConditionEval {
   private static astCache = new Map<string, ExprNode>();
+  private static queryHooks: QueryEvaluatorHooks | null = null;
+
+  static registerQueryHooks(hooks: QueryEvaluatorHooks) {
+    this.queryHooks = hooks;
+  }
+
+  private static getQueryHooks(): QueryEvaluatorHooks {
+    if (!this.queryHooks) {
+      require("../handler/jsonpathEngine");
+    }
+    if (!this.queryHooks) {
+      throw new Error("Query evaluator hooks are not registered");
+    }
+    return this.queryHooks;
+  }
+
+  static compileQuerySteps(rawPath: string): any[] {
+    return this.getQueryHooks().compileQuery(rawPath);
+  }
+
+  static evaluateQuerySteps(
+    baseValue: any,
+    steps: any[],
+    rootValue?: any
+  ): any[] {
+    if (baseValue === undefined || baseValue === NOTHING) {
+      return [];
+    }
+    return this.getQueryHooks().evaluateSteps(baseValue, steps, 0, rootValue);
+  }
+
+  private static evalQueryNodelist(
+    node: Extract<ExprNode, { type: "query" }>,
+    currentValue: any,
+    rootValue?: any
+  ): any[] {
+    const base = node.isRoot ? rootValue : currentValue;
+    return this.evaluateQuerySteps(base, node.steps, rootValue);
+  }
 
   static createCondition(condition: string) {
     const tokens: { type: string; value: string }[] = [];
@@ -671,6 +931,32 @@ export class ConditionEval {
     }
   }
 
+  private static evalNodelistComparison(
+    op: "===" | "!==" | "==" | "!=" | ">" | ">=" | "<" | "<=",
+    leftArr: any[],
+    rightArr: any[]
+  ): boolean {
+    if (op === "!=" || op === "!==") {
+      const eqOp = op === "!==" ? "===" : "==";
+      for (let i = 0; i < leftArr.length; i++) {
+        for (let j = 0; j < rightArr.length; j++) {
+          if (this.evalComparison(eqOp, leftArr[i], rightArr[j])) {
+            return false;
+          }
+        }
+      }
+      return true;
+    }
+    for (let i = 0; i < leftArr.length; i++) {
+      for (let j = 0; j < rightArr.length; j++) {
+        if (this.evalComparison(op, leftArr[i], rightArr[j])) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   static evalFilterAst(node: ExprNode, currentValue: any, rootValue?: any): boolean {
     switch (node.type) {
       case "logical": {
@@ -692,7 +978,51 @@ export class ConditionEval {
         const val = this.evalAst(node, currentValue, rootValue);
         return val !== NOTHING && Boolean(val);
       }
+      case "query": {
+        return (
+          this.evalQueryNodelist(node, currentValue, rootValue).length > 0
+        );
+      }
       case "binary": {
+        if (
+          (node.left.type === "query" || node.right.type === "query") &&
+          (node.op === "===" ||
+            node.op === "!==" ||
+            node.op === "==" ||
+            node.op === "!=" ||
+            node.op === "<" ||
+            node.op === "<=" ||
+            node.op === ">" ||
+            node.op === ">=")
+        ) {
+          const leftRaw =
+            node.left.type === "query"
+              ? this.evalQueryNodelist(node.left, currentValue, rootValue)
+              : [
+                  node.left.type === "literal"
+                    ? node.left.value
+                    : node.left.type === "current"
+                    ? currentValue === undefined
+                      ? NOTHING
+                      : currentValue
+                    : this.evalAst(node.left, currentValue, rootValue),
+                ];
+          const rightRaw =
+            node.right.type === "query"
+              ? this.evalQueryNodelist(node.right, currentValue, rootValue)
+              : [
+                  node.right.type === "literal"
+                    ? node.right.value
+                    : node.right.type === "current"
+                    ? currentValue === undefined
+                      ? NOTHING
+                      : currentValue
+                    : this.evalAst(node.right, currentValue, rootValue),
+                ];
+          const leftNodes = leftRaw.length === 0 ? [NOTHING] : leftRaw;
+          const rightNodes = rightRaw.length === 0 ? [NOTHING] : rightRaw;
+          return this.evalNodelistComparison(node.op, leftNodes, rightNodes);
+        }
         const left =
           node.left.type === "literal"
             ? node.left.value
@@ -807,6 +1137,10 @@ export class ConditionEval {
         return currentValue === undefined ? NOTHING : currentValue;
       case "root":
         return rootValue === undefined ? NOTHING : rootValue;
+      case "query": {
+        const nodes = this.evalQueryNodelist(node, currentValue, rootValue);
+        return nodes.length === 0 ? NOTHING : nodes[0];
+      }
       case "identifier":
         return NOTHING;
       case "member": {
@@ -917,6 +1251,7 @@ export class ConditionEval {
     switch (node.type) {
       case "current":
       case "root":
+      case "query":
       case "identifier":
         return true;
       case "literal":
@@ -930,6 +1265,42 @@ export class ConditionEval {
       case "logical":
       case "binary":
         return this.usesContext(node.left) || this.usesContext(node.right);
+    }
+  }
+
+  static usesRoot(node: ExprNode): boolean {
+    switch (node.type) {
+      case "root":
+        return true;
+      case "query": {
+        if (node.isRoot) {
+          return true;
+        }
+        const hooks = this.getQueryHooks();
+        if (hooks.collectNestedFilterAsts) {
+          const nested: ExprNode[] = [];
+          hooks.collectNestedFilterAsts(node.steps, nested);
+          for (let i = 0; i < nested.length; i++) {
+            if (this.usesRoot(nested[i])) {
+              return true;
+            }
+          }
+        }
+        return false;
+      }
+      case "literal":
+      case "current":
+      case "identifier":
+        return false;
+      case "member":
+        return this.usesRoot(node.object);
+      case "index":
+        return this.usesRoot(node.object) || this.usesRoot(node.index);
+      case "unary":
+        return this.usesRoot(node.argument);
+      case "logical":
+      case "binary":
+        return this.usesRoot(node.left) || this.usesRoot(node.right);
     }
   }
 
