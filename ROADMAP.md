@@ -44,3 +44,26 @@ Allineamento alle specifiche JSONPath complete descritte nel `README.md` (OpenSp
 - [ ] Supporto dual-package ESM / CommonJS e aggiornamento target TypeScript / `@types/node`.
 - [ ] Migrazione CI da Travis CI (`.travis.yml`) a GitHub Actions (test, coverage, benchmark regression check).
 - [ ] Aggiornamento del `README.md` per allineare la tabella delle feature effettivamente supportate.
+
+---
+
+## Fase 4 — Conformità completa JSONPath RFC 9535 (Performance-First)
+Allineamento integrale allo standard [RFC 9535](https://www.rfc-editor.org/info/rfc9535/) preservando zero-dependency, streaming a RAM limitata, `skipDecode`, `PrunedJsBuilder` e fast-path O(1) su dataset da 200+ MiB.
+
+Ordine di implementazione consigliato (per dipendenze e impatto):
+
+1. [ ] **#20 — Filtri senza parentesi tonde `?[...]`** ([OpenSpec](./openspec/changes/rfc9535-filter-parentheses/proposal.md))
+   - Normalizzazione a compile-time in `parseBracketSubscript` con zero overhead runtime e hit rate invariato su `astCache`.
+2. [ ] **#23 — Semantica Slice RFC 9535 (`step < 0`, `step === 0`, `end === 0`)** ([OpenSpec](./openspec/changes/rfc9535-slice-semantics/proposal.md))
+   - Algoritmo `Bounds` ufficiale, correzione di `end === 0`, fast-path O(1) preservato per `step > 0` e ring-buffer O(`k`) per tail reverse slice.
+3. [ ] **#25 — Escape Unicode (`\uXXXX`, surrogate) e validazione I-JSON / `member-name-shorthand`** ([OpenSpec](./openspec/changes/rfc9535-lexical-escapes-validation/proposal.md))
+   - Fast-path `indexOf("\\") === -1` e validazione esclusivamente a compile-time.
+4. [ ] **#24 — Semantica esistenza, confronti e `Nothing` nei filtri** ([OpenSpec](./openspec/changes/rfc9535-filter-semantics-nothing/proposal.md))
+   - Sentinella singleton `NOTHING` a zero allocazioni, equality strutturale con fast-path primitivo e preservazione dell'early-skip di `PrunedJsBuilder`.
+5. [ ] **#22 — Unioni eterogenee nei bracket e ordine/duplicati dei selettori** ([OpenSpec](./openspec/changes/rfc9535-heterogeneous-unions/proposal.md))
+   - Step `union` ordinato con fast-path invariato per unioni omogenee semplici.
+6. [ ] **#21 — Query JSONPath complete nei filtri (`@`, `$`) e proiezione root** ([OpenSpec](./openspec/changes/rfc9535-filter-full-queries-root/proposal.md))
+   - Compilazione una-tantum delle sub-query e `rootProjection` potata in `StreamingPathEngine` per evitare il caricamento dell'intera root in RAM quando si usa `$...`.
+7. [ ] **#19 — Funzioni standard RFC 9535 (`length`, `count`, `match`, `search`, `value`)** ([OpenSpec](./openspec/changes/rfc9535-standard-functions/proposal.md))
+   - Precompilazione I-Regexp a compile-time per `match`/`search`, fast-path ASCII O(1) per `length()` e tracciamento argomenti in `PrunedJsBuilder`.
+
