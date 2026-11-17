@@ -1057,4 +1057,82 @@ describe("JSONPath complete features", function () {
       expect(() => parse("$[?(@.tags[ == 'a')]")).toThrowError(PifferoJsonPathError);
     });
   });
+
+  describe("RFC 9535 Standard Functions (Issue #19)", function () {
+    it("should support length(), count(), match(), search(), and value() in streaming filters", async function () {
+      const data = {
+        minTagLen: 2,
+        users: [
+          {
+            id: 1,
+            name: "Alice",
+            bio: "😀ok",
+            tags: ["admin", "dev"],
+            scores: [95],
+            heavyUnused: { payload: "x".repeat(500) },
+          },
+          {
+            id: 2,
+            name: "bob",
+            bio: "hi",
+            tags: ["user"],
+            scores: [80, 90],
+            heavyUnused: { payload: "y".repeat(500) },
+          },
+          {
+            id: 3,
+            name: "Charlie-42",
+            bio: "x",
+            tags: [],
+            scores: [100],
+            heavyUnused: { payload: "z".repeat(500) },
+          },
+        ],
+      };
+
+      // length() on array & Unicode scalar string
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.users[?length(@.tags) >= $.minTagLen].id")
+        )
+      ).toEqual([1]);
+      expect(
+        JSON.parse(await Piffero.findAsPromise(makeStream(data), "$.users[?length(@.bio) == 3].id"))
+      ).toEqual([1]);
+
+      // count() with complex query argument & PrunedJsBuilder
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.users[?count(@.scores[*]) > 1].id")
+        )
+      ).toEqual([2]);
+
+      // value() returning scalar when nodelist has length 1, Nothing otherwise
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), "$.users[?value(@.scores[*]) >= 95].id")
+        )
+      ).toEqual([1, 3]);
+
+      // match() (full match) and search() (substring match)
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), '$.users[?match(@.name, "[A-Z][a-z]+")].id')
+        )
+      ).toEqual([1]);
+      expect(
+        JSON.parse(
+          await Piffero.findAsPromise(makeStream(data), '$.users[?search(@.name, "[0-9]+")].id')
+        )
+      ).toEqual([3]);
+    });
+
+    it("should throw PifferoJsonPathError on invalid function calls", function () {
+      expect(() => parse("$[?unknown(@.a)]")).toThrowError(PifferoJsonPathError);
+      expect(() => parse("$[?length(@.items[*]) > 0]")).toThrowError(PifferoJsonPathError);
+      expect(() => parse("$[?count(1) > 0]")).toThrowError(PifferoJsonPathError);
+      expect(() => parse("$[?value(1) == 1]")).toThrowError(PifferoJsonPathError);
+      expect(() => parse('$[?match(@.a)]')).toThrowError(PifferoJsonPathError);
+    });
+  });
 });

@@ -187,4 +187,66 @@ describe("ConditionEval", function () {
       expect(() => ConditionEval.compile("@.a[ == 1")).toThrow();
     });
   });
+
+  describe("RFC 9535 standard functions (Issue #19)", function () {
+    it("evaluates length() on ASCII strings, surrogate pairs, arrays, objects, and Nothing", function () {
+      expect(ConditionEval.evaluateFilter('length(@.s) == 3', { s: "abc" })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('length(@.s) == 2', { s: "😀a" })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('length(@.arr) == 4', { arr: [1, 2, 3, 4] })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('length(@.obj) == 2', { obj: { a: 1, b: 2 } })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('length(@.n) == 0', { n: 42 })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('length(@.missing) == 0', {})).toBeFalse();
+    });
+
+    it("evaluates count() on complex and singular queries", function () {
+      const doc = { items: [{ ok: true }, { ok: false }, { ok: true }], single: 10 };
+      expect(ConditionEval.evaluateFilter("count(@.items[*]) == 3", doc)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("count(@.items[?(@.ok == true)]) == 2", doc)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("count(@.single) == 1", doc)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("count(@.missing) == 0", doc)).toBeTrue();
+    });
+
+    it("evaluates value() on 0, 1, and >1 node lists", function () {
+      const doc = { one: [42], many: [1, 2], empty: [] };
+      expect(ConditionEval.evaluateFilter("value(@.one[*]) == 42", doc)).toBeTrue();
+      expect(ConditionEval.evaluateFilter("value(@.many[*]) == 1", doc)).toBeFalse();
+      expect(ConditionEval.evaluateFilter("value(@.empty[*]) == 1", doc)).toBeFalse();
+      expect(ConditionEval.evaluateFilter("value(@.one[0]) == 42", doc)).toBeTrue();
+    });
+
+    it("evaluates match() and search() with I-Regexp (RFC 9485) semantics", function () {
+      expect(ConditionEval.evaluateFilter('match(@.s, "a.c")', { s: "abc" })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('match(@.s, "a.c")', { s: "xabcy" })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('search(@.s, "a.c")', { s: "xabcy" })).toBeTrue();
+      // '.' in I-Regexp does not match \n or \r, but matches \u2028
+      expect(ConditionEval.evaluateFilter('match(@.s, "a.c")', { s: "a\nc" })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('match(@.s, "a.c")', { s: "a\u2028c" })).toBeTrue();
+      // Unicode category \p{Lu}
+      expect(ConditionEval.evaluateFilter('match(@.s, "\\\\p{Lu}+")', { s: "ABC" })).toBeTrue();
+      expect(ConditionEval.evaluateFilter('match(@.s, "\\\\p{Lu}+")', { s: "abc" })).toBeFalse();
+      // Non-string input returns false
+      expect(ConditionEval.evaluateFilter('match(@.s, "a")', { s: 123 })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('search(@.s, "a")', {})).toBeFalse();
+      // Invalid I-Regexp returns false instead of throwing
+      expect(ConditionEval.evaluateFilter('match(@.s, "^abc$")', { s: "abc" })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('search(@.s, "\\\\d+")', { s: "123" })).toBeFalse();
+      expect(ConditionEval.evaluateFilter('match(@.s, "a*?")', { s: "aaa" })).toBeFalse();
+      // Dynamic pattern
+      expect(
+        ConditionEval.evaluateFilter("match(@.s, $.pat)", { s: "hello" }, { pat: "h.*o" })
+      ).toBeTrue();
+    });
+
+    it("throws on invalid function signatures or unknown functions", function () {
+      expect(() => ConditionEval.compile("unknown(@.a)")).toThrow();
+      expect(() => ConditionEval.compile("length(@.items[*])")).toThrow();
+      expect(() => ConditionEval.compile("length()")).toThrow();
+      expect(() => ConditionEval.compile("count(123)")).toThrow();
+      expect(() => ConditionEval.compile('count("abc")')).toThrow();
+      expect(() => ConditionEval.compile("value(123)")).toThrow();
+      expect(() => ConditionEval.compile('match(@.a)')).toThrow();
+      expect(() => ConditionEval.compile('search(@.a, @.b, @.c)')).toThrow();
+      expect(() => ConditionEval.compile('length(match(@.a, "x"))')).toThrow();
+    });
+  });
 });

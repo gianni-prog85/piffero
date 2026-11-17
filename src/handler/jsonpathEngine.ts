@@ -1066,8 +1066,34 @@ function collectExprProjection(
       return true;
     case "current":
       return false;
-    case "query":
-      return node.isRoot;
+    case "query": {
+      if (node.isRoot) {
+        return true;
+      }
+      const steps = node.steps as JsonPathStep[];
+      const staticPrefix: string[] = [];
+      for (let i = 0; i < steps.length; i++) {
+        const st = steps[i];
+        if (!st.recursive && st.kind === "child") {
+          staticPrefix.push(st.key);
+        } else {
+          break;
+        }
+      }
+      if (staticPrefix.length === 0) {
+        return false;
+      }
+      const nested: ExprNode[] = [];
+      collectNestedFilterAsts(steps, nested);
+      for (let i = 0; i < nested.length; i++) {
+        if (ConditionEval.usesRoot(nested[i])) {
+          // Nested root filter inside current query is safe when full item is built
+          return false;
+        }
+      }
+      markProjectionPath(root, staticPrefix, false);
+      return true;
+    }
     case "member": {
       const chain = extractCurrentMemberChain(node);
       if (chain !== null) {
@@ -1123,6 +1149,14 @@ function collectExprProjection(
         collectExprProjection(node.left, root, false) &&
         collectExprProjection(node.right, root, false)
       );
+    case "call": {
+      for (let i = 0; i < node.args.length; i++) {
+        if (!collectExprProjection(node.args[i], root, false)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 }
 
@@ -1215,6 +1249,14 @@ function collectRootProjection(
         collectRootProjection(node.left, rootProj, false) &&
         collectRootProjection(node.right, rootProj, false)
       );
+    case "call": {
+      for (let i = 0; i < node.args.length; i++) {
+        if (!collectRootProjection(node.args[i], rootProj, false)) {
+          return false;
+        }
+      }
+      return true;
+    }
   }
 }
 
