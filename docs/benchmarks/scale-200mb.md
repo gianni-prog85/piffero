@@ -1,9 +1,10 @@
 # 200 MiB Scale Benchmark (`200.01 MiB` / `209.72 MB` JSON)
 
-Large-scale 11-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
+Large-scale 13-scenario benchmark comparison across 7 libraries on a **200.01 MiB** (**209.72 MB**, **62,683** GitHub event elements) dataset generated from [large-file.json](../../spec/jsonFiles/large-file.json) using [`compare-200mb.js`](../../benchmarking/compare-200mb.js).
 
 ```bash
 npm run benchmark:200mb
+npm run benchmark:filters   # ConditionEval RFC 9535 microbenchmark
 ```
 
 ## Benchmark Results (200 MiB JSON, avg ms)
@@ -21,12 +22,30 @@ npm run benchmark:200mb
 | **9. Existence filter (RFC 9535 `?[...]`)** `$[?@.payload.issue].payload.issue.number` (7,725) | 1620.08 ms | **1590.25 ms** | N/A | N/A (throws `Unsupported node: FilterSelector`) | N/A | N/A | 4502.94 ms *(duck-typing)* | N/A *(returns `[]`)* |
 | **10. Array slice early-exit** `$[0:10:2]` (5) | 2.48 ms | **1.24 ms** | N/A | N/A | N/A | N/A | N/A | 2104.39 ms |
 | **11. Reverse slice** `$[10:0:-1]` (10) | 1077.44 ms | **1054.89 ms** | N/A | N/A | N/A | N/A | N/A | 1840.44 ms |
+| **12. Equality filter** `$[?(@.type == "IssuesEvent")].id` (3,035) | 1480.75 ms | **1460.66 ms** | N/A | N/A | N/A | N/A | N/A | 1866.99 ms |
+| **13. Missing intermediate comparison** `$[?(@.payload.issue.number > 1000)].payload.issue.number` (1,405) | 1624.27 ms | **1610.40 ms** | N/A | N/A | N/A | N/A | N/A | N/A *(throws `TypeError`)* |
+
+## ConditionEval RFC 9535 Microbenchmark (`npm run benchmark:filters`)
+
+Single-threaded CPU throughput over 200,000 pre-compiled AST evaluations ([`bench-conditioneval.js`](../../benchmarking/bench-conditioneval.js)):
+
+| Scenario | ns / op | ops / sec |
+|---|---|---|
+| Existence present falsy (`@.flag` with `false`) | 38.3 ns | 26.1M ops/s |
+| Existence missing deep (`@.a.b.c -> NOTHING`) | 83.9 ns | 11.9M ops/s |
+| Equality string (`@.type == "IssuesEvent"`) | 88.3 ns | 11.3M ops/s |
+| `Nothing == Nothing` (`@.x == @.y`) | 72.4 ns | 13.8M ops/s |
+| Ordered numeric (`@.a > @.b`) | 93.5 ns | 10.7M ops/s |
+| Ordered type mismatch (`"1500" > 1000`) | 89.5 ns | 11.2M ops/s |
+| Deep structural equality (`@.meta == @.other`) | 275.3 ns | 3.63M ops/s |
+| `rfc9535Equals` direct (`NOTHING` / primitive fast-path) | 8.4–10.2 ns | 97.6M–118.8M ops/s |
 
 ## Key Takeaways
 
 - **#1 overall on every point lookup and slice**: `Piffero (string)` beats every tested library—including in-memory `jsonpath-plus`—at start-of-file (**0.45 ms** vs `3301.31 ms`, **~7,336x**), mid-file (**601.17 ms** vs `2061.89 ms`, **~3.4x**), end-of-file (**1052.55 ms** vs `1765.17 ms`, **~1.7x**; and ahead of `@sapientpro/json-stream` at `1121.61 ms`), forward slice `$[0:10:2]` (**1.24 ms** vs `2104.39 ms`, **~1,697x**), and reverse slice `$[10:0:-1]` (**1054.89 ms** vs `1840.44 ms`, **~1.7x**; all other streaming parsers lack RFC 9535 slice support).
-- **#1 overall on nested wildcards & RFC 9535 filters (`?[...]`)**:
+- **#1 overall on nested wildcards & RFC 9535 filters (`?[...]`, `==`, `Nothing`-safe comparisons)**:
   - `$[*].payload.commits[*].author.email`: **1611.00 ms** (faster than `json-web-streams` `1669.64 ms`, `jsonpath-plus` `1735.45 ms`, `@sapientpro/json-stream` `1911.17 ms`, `@streamparser/json` `3756.11 ms`, `Oboe` `4499.91 ms`, and `stream-json` `5619.68 ms`).
   - `$..user.login`: **2602.03 ms** (faster than `@sapientpro/json-stream` `3138.20 ms`, `Oboe` `4518.88 ms`, and `stream-json` `5488.51 ms`).
   - `$[?@.payload.issue].payload.issue.number` (RFC 9535 without parentheses): **1590.25 ms** (**~2.8x** faster than `Oboe` duck-typing at `4502.94 ms`), while `jsonpath-plus` silently returns `[]` and `json-web-streams` throws `Unsupported node: FilterSelector`.
+  - `$[?(@.type == "IssuesEvent")].id`: **1460.66 ms** vs `jsonpath-plus` `1866.99 ms` (**~1.28x** faster, bounded RAM), and `$[?(@.payload.issue.number > 1000)].payload.issue.number` succeeds in **1610.40 ms** via `NOTHING` propagation whereas `jsonpath-plus` throws `TypeError`.
 - **Consistent bounded-memory scaling**: Scaling 5.35x from 38 MB to 200 MiB keeps Piffero's throughput linear while avoiding full-document V8 heap allocation.

@@ -17,6 +17,7 @@ Side-by-side comparison across all 8 tested libraries (`Piffero`, `@sapientpro/j
 | **Compound filters (`?()`) & script expressions (`()`)** | ✅ | ❌ (throws) | Custom JS filter | ❌ (throws) | ❌ (throws) | Duck-typing `{prop}` only | Predicate fn only | ✅ |
 | **RFC 9535 filters without parens (`?[?@.prop]`)** | ✅ | ❌ (throws) | ❌ | ❌ (parses, then throws) | ❌ (throws) | Duck-typing `{prop}` only | ❌ | ❌ (returns `[]`) |
 | **RFC 9535 Unicode escapes (`\uXXXX`, surrogates) & I-JSON / shorthand** | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ (no `\uXXXX` decode in `[]` / no bounds) |
+| **RFC 9535 filter semantics (`Nothing`, falsy existence, no-coercion `==`, type-safe `<`/`>`)** | ✅ | ❌ | ❌ (JS custom) | ❌ | ❌ | ❌ | ❌ | ❌ (JS truthiness & `==` coercion) |
 | **Safe missing intermediate property access in filters** | ✅ | N/A | N/A | N/A | N/A | N/A | N/A | ❌ (throws `TypeError`) |
 | **Preserves JSON `null` values** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (skipped as EOF) | ✅ |
 | **Built-in TypeScript declarations** | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ (DefinitelyTyped) | ❌ | ✅ |
