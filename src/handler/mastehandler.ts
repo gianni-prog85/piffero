@@ -453,11 +453,28 @@ export class MasterHandler implements SaxHandler {
   }
 }
 
+function jsonStringMatches(expectedQuoted: string, rawNode: any): boolean {
+  if (expectedQuoted === rawNode) {
+    return true;
+  }
+  if (typeof rawNode === "string" && rawNode.indexOf("\\") !== -1) {
+    try {
+      return JSON.stringify(JSON.parse(rawNode)) === expectedQuoted;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 function extractFromParsed(obj: any, path: ParsedPath): any[] {
   if (!path) {
     return [obj];
   }
-  const key = path.value.slice(1, -1);
+  const key =
+    path.value.indexOf("\\") === -1
+      ? path.value.slice(1, -1)
+      : JSON.parse(path.value);
   if (obj === null || obj === undefined || typeof obj !== "object" || !(key in obj)) {
     return [];
   }
@@ -629,7 +646,7 @@ class SingleStepHandler {
           this.push(`${string}`);
         }
       }
-    } else if (status.path.value === node && status.depthCounter === 0) {
+    } else if (jsonStringMatches(status.path.value, node) && status.depthCounter === 0) {
       if (!status.isInArray) {
         status.recording = true;
         status.verified = true;
@@ -793,7 +810,7 @@ class SingleStepHandler {
       } else {
         this.push(`${node}:`);
       }
-    } else if (status.depthCounter === 1 && status.path.value === node) {
+    } else if (status.depthCounter === 1 && jsonStringMatches(status.path.value, node)) {
       if (!status.isInArray) {
         status.recording = true;
         status.verified = true;
@@ -873,9 +890,10 @@ class SingleStepHandler {
     return (
       status.isMatching &&
       status.depthCounter === 3 &&
-      condition.key === status.lastkey &&
+      jsonStringMatches(condition.key, status.lastkey) &&
       (status.last === KEY || status.last === OPEN_OBJECT) &&
-      condition.value === value
+      (condition.value === value ||
+        (condition.value.startsWith('"') && jsonStringMatches(condition.value, value)))
     );
   }
 }

@@ -1,4 +1,8 @@
-import { ConditionEval, ExprNode } from "../conditioneval/conditioneval";
+import {
+  ConditionEval,
+  ExprNode,
+  decodeJsonPathStringInner,
+} from "../conditioneval/conditioneval";
 import { SaxHandler } from "../libs/clarinet/cstream";
 
 export type JsonPathStep =
@@ -38,6 +42,31 @@ export interface LegacyParsedPath {
 export const PATH_ERROR_MESSAGE = "Invalid json path";
 
 export class PifferoJsonPathError extends Error {}
+
+function isMemberNameFirst(cp: number): boolean {
+  return (
+    (cp >= 0x41 && cp <= 0x5A) ||
+    (cp >= 0x61 && cp <= 0x7A) ||
+    cp === 0x5F ||
+    (cp >= 0x80 && cp <= 0xD7FF) ||
+    (cp >= 0xE000 && cp <= 0x10FFFF)
+  );
+}
+
+function isMemberNameChar(cp: number): boolean {
+  return isMemberNameFirst(cp) || (cp >= 0x30 && cp <= 0x39);
+}
+
+function parseIJsonInt(raw: string, fullPath: string): number {
+  if (!/^(?:0|-?[1-9]\d*)$/.test(raw)) {
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+  }
+  const num = Number(raw);
+  if (!Number.isSafeInteger(num)) {
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+  }
+  return num;
+}
 
 function findMatchingBracket(
   str: string,
@@ -115,7 +144,7 @@ function splitOutsideQuotes(str: string, delimiter: string): string[] {
   return parts;
 }
 
-function tryUnquoteString(raw: string): string | null {
+function tryUnquoteString(raw: string, fullPath: string): string | null {
   const trimmed = raw.trim();
   if (trimmed.length < 2) {
     return null;
@@ -139,19 +168,11 @@ function tryUnquoteString(raw: string): string | null {
   if (i !== trimmed.length - 1) {
     return null;
   }
-  const inner = trimmed.slice(1, -1);
-  return inner.replace(/\\(.)/g, (_, c) => {
-    switch (c) {
-      case "n":
-        return "\n";
-      case "r":
-        return "\r";
-      case "t":
-        return "\t";
-      default:
-        return c;
-    }
-  });
+  try {
+    return decodeJsonPathStringInner(trimmed.slice(1, -1), quote);
+  } catch {
+    throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
+  }
 }
 
 function parseBracketSubscript(
@@ -225,8 +246,8 @@ function parseBracketSubscript(
 
   // Quoted property name or union of quoted property names
   const commaParts = splitOutsideQuotes(inner, ",");
-  if (commaParts.length > 0 && commaParts.every((p) => tryUnquoteString(p) !== null)) {
-    const keys = commaParts.map((p) => tryUnquoteString(p) as string);
+  if (commaParts.length > 0 && commaParts.every((p) => tryUnquoteString(p, fullPath) !== null)) {
+    const keys = commaParts.map((p) => tryUnquoteString(p, fullPath) as string);
     if (keys.length === 1) {
       return { kind: "child", key: keys[0], recursive };
     }
@@ -240,22 +261,16 @@ function parseBracketSubscript(
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
     }
     const [startRaw, endRaw, stepRaw] = colonParts.map((s) => s.trim());
-    if (
-      (startRaw !== "" && !/^-?\d+$/.test(startRaw)) ||
-      (endRaw !== "" && !/^-?\d+$/.test(endRaw)) ||
-      (stepRaw !== undefined && stepRaw !== "" && !/^-?\d+$/.test(stepRaw))
-    ) {
-      throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${fullPath}`);
-    }
-    const start = startRaw === "" ? undefined : Number(startRaw);
-    const end = endRaw === "" ? undefined : Number(endRaw);
-    const step = stepRaw === undefined || stepRaw === "" ? 1 : Number(stepRaw);
+    const start = startRaw === "" ? undefined : parseIJsonInt(startRaw, fullPath);
+    const end = endRaw === "" ? undefined : parseIJsonInt(endRaw, fullPath);
+    const step =
+      stepRaw === undefined || stepRaw === "" ? 1 : parseIJsonInt(stepRaw, fullPath);
     return { kind: "slice", start, end, step, recursive };
   }
 
   // Numeric union [1,2,3] or single index [0]
   if (commaParts.every((p) => /^-?\d+$/.test(p.trim()))) {
-    const nums = commaParts.map((p) => Number(p.trim()));
+    const nums = commaParts.map((p) => parseIJsonInt(p.trim(), fullPath));
     return {
       kind: "index",
       indexes: new Set(nums),
@@ -314,19 +329,21 @@ export function tokenizeJsonPath(jsonPath: string): JsonPathStep[] {
       continue;
     }
 
-    // Read property identifier up to '.' or '['
+    // Read member-name-shorthand (RFC 9535 §2.5.1.1) up to '.' or '['
     const start = i;
-    while (i < len && jsonPath[i] !== "." && jsonPath[i] !== "[") {
-      const ch = jsonPath[i];
-      if (ch === "]" || ch === "(" || ch === ")" || ch === "*") {
-        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${jsonPath}`);
-      }
-      i++;
-    }
-    const key = jsonPath.slice(start, i);
-    if (!key) {
+    const firstCp = jsonPath.codePointAt(i);
+    if (firstCp === undefined || !isMemberNameFirst(firstCp)) {
       throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${jsonPath}`);
     }
+    i += firstCp > 0xFFFF ? 2 : 1;
+    while (i < len && jsonPath[i] !== "." && jsonPath[i] !== "[") {
+      const cp = jsonPath.codePointAt(i);
+      if (cp === undefined || !isMemberNameChar(cp)) {
+        throw new PifferoJsonPathError(`${PATH_ERROR_MESSAGE}: ${jsonPath}`);
+      }
+      i += cp > 0xFFFF ? 2 : 1;
+    }
+    const key = jsonPath.slice(start, i);
     steps.push({ kind: "child", key, recursive });
   }
 
