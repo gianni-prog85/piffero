@@ -43,7 +43,7 @@ Allineamento alle specifiche JSONPath complete descritte nel `README.md` (OpenSp
 - [ ] Migrazione da `tslint` (deprecato) a `eslint` + `@typescript-eslint`.
 - [ ] Supporto dual-package ESM / CommonJS e aggiornamento target TypeScript / `@types/node`.
 - [ ] Migrazione CI da Travis CI (`.travis.yml`) a GitHub Actions (test, coverage, benchmark regression check).
-- [ ] Aggiornamento del `README.md` per allineare la tabella delle feature effettivamente supportate.
+- [x] Aggiornamento del `README.md` per allineare la tabella delle feature effettivamente supportate.
 
 ---
 
