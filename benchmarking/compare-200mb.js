@@ -353,6 +353,17 @@ async function main() {
       jpp: "$[?(@.payload.issue)].payload.issue.number",
       runs: 2,
     },
+    {
+      name: "9. RFC 9535 filter without parens ($[?@.payload.issue].payload.issue.number)",
+      piffero: "$[?@.payload.issue].payload.issue.number",
+      sapient: null,
+      sj: null,
+      jws: null,
+      oboe: { pattern: "![*].payload{issue}.issue.number", abort: false },
+      sp: null,
+      jpp: null,
+      runs: 2,
+    },
   ];
 
   for (const c of cases) {
