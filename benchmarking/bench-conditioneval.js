@@ -64,6 +64,16 @@ function main() {
   const astGtNum = ConditionEval.compile("@.a > @.b");
   const astGtMismatch = ConditionEval.compile("@.a > @.b");
   const astDeepEq = ConditionEval.compile("@.meta == @.other");
+  const astLenAscii = ConditionEval.compile("length(@.text) > 5");
+  const astLenUnicode = ConditionEval.compile("length(@.emoji) == 3");
+  const astCountQuery = ConditionEval.compile("count(@.tags[*]) >= 2");
+  const astValueQuery = ConditionEval.compile("value(@.single[*]) == 42");
+  const astMatch = ConditionEval.compile('match(@.type, "[A-Z][a-z]+Event")');
+  const astSearch = ConditionEval.compile('search(@.type, "Issues")');
+
+  const funcDocAscii = { text: "IssuesEvent" };
+  const funcDocUnicode = { emoji: "😀ok" };
+  const funcDocNodes = { tags: ["rfc9535", "jsonpath", "streaming"], single: [42] };
 
   const rows = [
     runBench("Existence present falsy (@.flag)", N, () =>
@@ -92,6 +102,24 @@ function main() {
     ),
     runBench("rfc9535Equals direct: primitive fast-path", N, (i) =>
       rfc9535Equals("IssuesEvent", (i & 1) === 0 ? "IssuesEvent" : "PushEvent")
+    ),
+    runBench("RFC9535 length() ASCII fast-path", N, () =>
+      ConditionEval.evalFilterAst(astLenAscii, funcDocAscii)
+    ),
+    runBench("RFC9535 length() UTF-16 surrogate count", N, () =>
+      ConditionEval.evalFilterAst(astLenUnicode, funcDocUnicode)
+    ),
+    runBench("RFC9535 count(@.tags[*])", N, () =>
+      ConditionEval.evalFilterAst(astCountQuery, funcDocNodes)
+    ),
+    runBench("RFC9535 value(@.single[*])", N, () =>
+      ConditionEval.evalFilterAst(astValueQuery, funcDocNodes)
+    ),
+    runBench("RFC9535 match() precompiled I-Regexp", N, (i) =>
+      ConditionEval.evalFilterAst(astMatch, (i & 1) === 0 ? eventHit : eventMiss)
+    ),
+    runBench("RFC9535 search() precompiled I-Regexp", N, (i) =>
+      ConditionEval.evalFilterAst(astSearch, (i & 1) === 0 ? eventHit : eventMiss)
     ),
   ];
 

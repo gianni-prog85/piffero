@@ -37,7 +37,13 @@ export type ExprNode =
       left: ExprNode;
       right: ExprNode;
     }
-  | { type: "logical"; op: "&&" | "||"; left: ExprNode; right: ExprNode };
+  | { type: "logical"; op: "&&" | "||"; left: ExprNode; right: ExprNode }
+  | {
+      type: "call";
+      name: string;
+      args: ExprNode[];
+      compiledRegex?: RegExp | null;
+    };
 
 interface ExprToken {
   type: "number" | "string" | "ident" | "op" | "at" | "dollar" | "punct" | "query";
@@ -477,7 +483,8 @@ function tokenizeExpression(expr: string): ExprToken[] {
       ch === ")" ||
       ch === "[" ||
       ch === "]" ||
-      ch === "."
+      ch === "." ||
+      ch === ","
     ) {
       tokens.push({ type: "punct", value: ch });
       i++;
@@ -520,6 +527,344 @@ function tokenizeExpression(expr: string): ExprToken[] {
   }
 
   return tokens;
+}
+
+type Rfc9535ExprType = "ValueType" | "LogicalType" | "NodesType";
+
+function isSingularQueryNode(node: ExprNode): boolean {
+  let cur: ExprNode = node;
+  while (true) {
+    if (cur.type === "current" || cur.type === "root") {
+      return true;
+    }
+    if (cur.type === "member") {
+      cur = cur.object;
+      continue;
+    }
+    if (cur.type === "index") {
+      if (
+        cur.index.type !== "literal" ||
+        (typeof cur.index.value !== "string" &&
+          !(typeof cur.index.value === "number" && Number.isInteger(cur.index.value)))
+      ) {
+        return false;
+      }
+      cur = cur.object;
+      continue;
+    }
+    return false;
+  }
+}
+
+function getExprType(node: ExprNode): Rfc9535ExprType {
+  switch (node.type) {
+    case "query":
+      return "NodesType";
+    case "current":
+    case "root":
+    case "member":
+    case "index":
+      return isSingularQueryNode(node) ? "ValueType" : "ValueType";
+    case "logical":
+      return "LogicalType";
+    case "unary":
+      return node.op === "!" ? "LogicalType" : "ValueType";
+    case "binary":
+      return node.op === "===" ||
+        node.op === "!==" ||
+        node.op === "==" ||
+        node.op === "!=" ||
+        node.op === "<" ||
+        node.op === "<=" ||
+        node.op === ">" ||
+        node.op === ">="
+        ? "LogicalType"
+        : "ValueType";
+    case "call":
+      return node.name === "match" || node.name === "search"
+        ? "LogicalType"
+        : "ValueType";
+    case "literal":
+    case "identifier":
+      return "ValueType";
+  }
+}
+
+function isNodesTypeArg(node: ExprNode): boolean {
+  return node.type === "query" || isSingularQueryNode(node);
+}
+
+function isValueTypeArg(node: ExprNode): boolean {
+  if (node.type === "query") {
+    return false;
+  }
+  return getExprType(node) === "ValueType";
+}
+
+const IREGEXP_CACHE_MAX = 1024;
+const iRegexpCache = new Map<string, RegExp | null>();
+
+const IREGEXP_UNICODE_CATEGORIES = new Set([
+  "L", "Lu", "Ll", "Lt", "Lm", "Lo",
+  "M", "Mn", "Mc", "Me",
+  "N", "Nd", "Nl", "No",
+  "P", "Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",
+  "Z", "Zs", "Zl", "Zp",
+  "S", "Sm", "Sc", "Sk", "So",
+  "C", "Cc", "Cf", "Co", "Cn",
+]);
+
+function translateIRegexp(pattern: string): string | null {
+  let out = "";
+  let inCharClass = false;
+  const len = pattern.length;
+  for (let i = 0; i < len; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      if (i + 1 >= len) {
+        return null;
+      }
+      const next = pattern[++i];
+      if (
+        next === "n" ||
+        next === "r" ||
+        next === "t" ||
+        next === "\\" ||
+        next === "|" ||
+        next === "." ||
+        next === "-" ||
+        next === "^" ||
+        next === "?" ||
+        next === "*" ||
+        next === "+" ||
+        next === "{" ||
+        next === "}" ||
+        next === "(" ||
+        next === ")" ||
+        next === "[" ||
+        next === "]" ||
+        next === "/"
+      ) {
+        out += "\\" + next;
+        continue;
+      }
+      if (next === "p" || next === "P") {
+        if (i + 1 >= len || pattern[i + 1] !== "{") {
+          return null;
+        }
+        const closeBrace = pattern.indexOf("}", i + 2);
+        if (closeBrace === -1) {
+          return null;
+        }
+        const cat = pattern.slice(i + 2, closeBrace);
+        if (!IREGEXP_UNICODE_CATEGORIES.has(cat)) {
+          return null;
+        }
+        out += "\\" + next + "{" + cat + "}";
+        i = closeBrace;
+        continue;
+      }
+      // Disallow JS-only escapes such as \d, \w, \s, \b, \1, \u, \x, etc.
+      return null;
+    }
+
+    if (inCharClass) {
+      if (ch === "]") {
+        inCharClass = false;
+        out += "]";
+        continue;
+      }
+      if (ch === "[") {
+        // Unescaped '[' inside charClass is invalid in I-Regexp
+        return null;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === "[") {
+      inCharClass = true;
+      out += "[";
+      if (i + 1 < len && pattern[i + 1] === "^") {
+        out += "^";
+        i++;
+      }
+      // Disallow empty character class [] or [^]
+      if (i + 1 >= len || pattern[i + 1] === "]") {
+        return null;
+      }
+      continue;
+    }
+
+    if (ch === "]") {
+      return null;
+    }
+
+    if (ch === "^" || ch === "$") {
+      // Unescaped ^ and $ outside [...] are invalid in I-Regexp (RFC 9485)
+      return null;
+    }
+
+    if (ch === ".") {
+      out += "[^\\n\\r]";
+      continue;
+    }
+
+    if (ch === "(") {
+      // Disallow (?...) non-capturing, lookahead, named groups, etc.
+      if (i + 1 < len && pattern[i + 1] === "?") {
+        return null;
+      }
+      out += "(";
+      continue;
+    }
+
+    if (ch === "*" || ch === "+" || ch === "?") {
+      // Disallow lazy quantifiers (*?, +?, ??)
+      if (i + 1 < len && pattern[i + 1] === "?") {
+        return null;
+      }
+      out += ch;
+      continue;
+    }
+
+    if (ch === "{") {
+      const closeBrace = pattern.indexOf("}", i + 1);
+      if (closeBrace === -1) {
+        return null;
+      }
+      const quant = pattern.slice(i + 1, closeBrace);
+      if (!/^[0-9]+(?:,[0-9]*)?$/.test(quant)) {
+        return null;
+      }
+      if (closeBrace + 1 < len && pattern[closeBrace + 1] === "?") {
+        return null;
+      }
+      out += "{" + quant + "}";
+      i = closeBrace;
+      continue;
+    }
+
+    out += ch;
+  }
+
+  if (inCharClass) {
+    return null;
+  }
+  return out;
+}
+
+function compileIRegexp(pattern: string, fullMatch: boolean): RegExp | null {
+  const cacheKey = (fullMatch ? "M:" : "S:") + pattern;
+  const cached = iRegexpCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const translated = translateIRegexp(pattern);
+  let compiled: RegExp | null = null;
+  if (translated !== null) {
+    try {
+      compiled = new RegExp(
+        fullMatch ? `^(?:${translated})$` : translated,
+        "u"
+      );
+    } catch {
+      compiled = null;
+    }
+  }
+  if (iRegexpCache.size >= IREGEXP_CACHE_MAX) {
+    const firstKey = iRegexpCache.keys().next().value;
+    if (firstKey !== undefined) {
+      iRegexpCache.delete(firstKey);
+    }
+  }
+  iRegexpCache.set(cacheKey, compiled);
+  return compiled;
+}
+
+function lengthValue(val: any): any {
+  if (typeof val === "string") {
+    if (!/[\uD800-\uDFFF]/.test(val)) {
+      return val.length;
+    }
+    let count = 0;
+    for (let i = 0; i < val.length; i++) {
+      const code = val.charCodeAt(i);
+      count++;
+      if (code >= 0xD800 && code <= 0xDBFF && i + 1 < val.length) {
+        const next = val.charCodeAt(i + 1);
+        if (next >= 0xDC00 && next <= 0xDFFF) {
+          i++;
+        }
+      }
+    }
+    return count;
+  }
+  if (Array.isArray(val)) {
+    return val.length;
+  }
+  if (val !== null && typeof val === "object" && val !== NOTHING) {
+    return Object.keys(val).length;
+  }
+  return NOTHING;
+}
+
+function buildValidatedCallNode(
+  name: string,
+  args: ExprNode[],
+  rawExpr: string
+): Extract<ExprNode, { type: "call" }> {
+  switch (name) {
+    case "length": {
+      if (args.length !== 1 || !isValueTypeArg(args[0])) {
+        throw new Error(
+          `Function 'length' expects 1 ValueType argument in expression: ${rawExpr}`
+        );
+      }
+      return { type: "call", name, args };
+    }
+    case "count": {
+      if (args.length !== 1 || !isNodesTypeArg(args[0])) {
+        throw new Error(
+          `Function 'count' expects 1 NodesType argument in expression: ${rawExpr}`
+        );
+      }
+      return { type: "call", name, args };
+    }
+    case "value": {
+      if (args.length !== 1 || !isNodesTypeArg(args[0])) {
+        throw new Error(
+          `Function 'value' expects 1 NodesType argument in expression: ${rawExpr}`
+        );
+      }
+      return { type: "call", name, args };
+    }
+    case "match":
+    case "search": {
+      if (
+        args.length !== 2 ||
+        !isValueTypeArg(args[0]) ||
+        !isValueTypeArg(args[1])
+      ) {
+        throw new Error(
+          `Function '${name}' expects 2 ValueType arguments in expression: ${rawExpr}`
+        );
+      }
+      const isMatch = name === "match";
+      let compiledRegex: RegExp | null | undefined = undefined;
+      if (args[1].type === "literal") {
+        compiledRegex =
+          typeof args[1].value === "string"
+            ? compileIRegexp(args[1].value, isMatch)
+            : null;
+      }
+      return { type: "call", name, args, compiledRegex };
+    }
+    default:
+      throw new Error(
+        `Unknown JSONPath function '${name}' in expression: ${rawExpr}`
+      );
+  }
 }
 
 class ExprParser {
@@ -714,6 +1059,29 @@ class ExprParser {
 
     if (tok.type === "ident") {
       this.consume();
+      if (this.peek()?.type === "punct" && this.peek()?.value === "(") {
+        this.consume(); // consume '('
+        const args: ExprNode[] = [];
+        if (!(this.peek()?.type === "punct" && this.peek()?.value === ")")) {
+          while (true) {
+            args.push(this.parseOr());
+            const sep = this.peek();
+            if (sep?.type === "punct" && sep.value === ",") {
+              this.consume();
+              continue;
+            }
+            break;
+          }
+        }
+        const closeTok = this.peek();
+        if (!closeTok || closeTok.type !== "punct" || closeTok.value !== ")") {
+          throw new Error(
+            `Expected ')' after function arguments in expression: ${this.raw}`
+          );
+        }
+        this.consume();
+        return buildValidatedCallNode(tok.value, args, this.raw);
+      }
       if (tok.value === "true") return { type: "literal", value: true };
       if (tok.value === "false") return { type: "literal", value: false };
       if (tok.value === "null") return { type: "literal", value: null };
@@ -1122,10 +1490,67 @@ export class ConditionEval {
       case "current":
       case "root":
         return this.evalAst(node, currentValue, rootValue) !== NOTHING;
+      case "call": {
+        if (node.name === "match" || node.name === "search") {
+          return this.evalCall(node, currentValue, rootValue) === true;
+        }
+        const val = this.evalCall(node, currentValue, rootValue);
+        return val !== NOTHING && Boolean(val);
+      }
       case "literal":
         return Boolean(node.value);
       case "identifier":
         return false;
+    }
+  }
+
+  private static evalNodesArg(
+    arg: ExprNode,
+    currentValue: any,
+    rootValue?: any
+  ): any[] {
+    if (arg.type === "query") {
+      return this.evalQueryNodelist(arg, currentValue, rootValue);
+    }
+    const val = this.evalAst(arg, currentValue, rootValue);
+    return val === NOTHING ? [] : [val];
+  }
+
+  private static evalCall(
+    node: Extract<ExprNode, { type: "call" }>,
+    currentValue: any,
+    rootValue?: any
+  ): any {
+    switch (node.name) {
+      case "length": {
+        const val = this.evalAst(node.args[0], currentValue, rootValue);
+        return lengthValue(val);
+      }
+      case "count": {
+        return this.evalNodesArg(node.args[0], currentValue, rootValue).length;
+      }
+      case "value": {
+        const nodes = this.evalNodesArg(node.args[0], currentValue, rootValue);
+        return nodes.length === 1 ? nodes[0] : NOTHING;
+      }
+      case "match":
+      case "search": {
+        const str = this.evalAst(node.args[0], currentValue, rootValue);
+        if (typeof str !== "string") {
+          return false;
+        }
+        let regex = node.compiledRegex;
+        if (regex === undefined) {
+          const pat = this.evalAst(node.args[1], currentValue, rootValue);
+          if (typeof pat !== "string") {
+            return false;
+          }
+          regex = compileIRegexp(pat, node.name === "match");
+        }
+        return regex !== null && regex.test(str);
+      }
+      default:
+        return NOTHING;
     }
   }
 
@@ -1141,6 +1566,8 @@ export class ConditionEval {
         const nodes = this.evalQueryNodelist(node, currentValue, rootValue);
         return nodes.length === 0 ? NOTHING : nodes[0];
       }
+      case "call":
+        return this.evalCall(node, currentValue, rootValue);
       case "identifier":
         return NOTHING;
       case "member": {
@@ -1256,6 +1683,12 @@ export class ConditionEval {
         return true;
       case "literal":
         return false;
+      case "call": {
+        for (let i = 0; i < node.args.length; i++) {
+          if (this.usesContext(node.args[i])) return true;
+        }
+        return false;
+      }
       case "member":
         return this.usesContext(node.object);
       case "index":
@@ -1285,6 +1718,12 @@ export class ConditionEval {
               return true;
             }
           }
+        }
+        return false;
+      }
+      case "call": {
+        for (let i = 0; i < node.args.length; i++) {
+          if (this.usesRoot(node.args[i])) return true;
         }
         return false;
       }
